@@ -87,7 +87,7 @@ const Login = () => {
             justifyContent: "center",
             bgcolor: "#000",
             borderRadius: "1rem",
-            border: "2px solid #03c2a9",
+            border: "2px solid #00c389",
           }}
         >
           <Box
@@ -107,7 +107,7 @@ const Login = () => {
             variant="h6"
             component="h1"
             align="center"
-            sx={{ fontWeight: "bolder", mt: 2, color: "#03c2a9 " }}
+            sx={{ fontWeight: "bolder", mt: 2, color: "#00c389" }}
             gutterBottom
           >
             LOGIN
@@ -158,7 +158,7 @@ const Login = () => {
             fullWidth
             variant="contained"
             // color="warning"
-            sx={{ mt: 2, mb: 2, bgcolor: "#03c2a9", fontWeight: 900 }}
+            sx={{ mt: 2, mb: 2, bgcolor: "#00c389", fontWeight: 900 }}
             disabled={loading}
           >
             {loading ? <CircularProgress size={24} color="inherit" /> : "Login"}
@@ -167,14 +167,14 @@ const Login = () => {
           <Box display="flex" justifyContent="space-between">
             <Button
               size="small"
-              sx={{ color: "#03c2a9", fontWeight: 900 }}
+              sx={{ color: "#00c389", fontWeight: 900 }}
               onClick={() => setForgotOpen(true)}
             >
               Forgot Password?
             </Button>
             <Button
               size="small"
-              sx={{ color: "#03c2a9", fontWeight: 900 }}
+              sx={{ color: "#00c389", fontWeight: 900 }}
               onClick={() => setChangeOpen(true)}
             >
               Change Password
