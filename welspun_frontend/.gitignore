@@ -1,0 +1,28 @@
+# Ignore all MP4 and MKV video files globally
+*.mp4
+*.mkv
+
+# Frontend dependencies and build output
+node_modules/
+.next/
+
+# Python bytecode
+screw_backend/__pycache__/
+
+# Backend database files
+screw_backend/*.db
+
+# Environment files
+.env
+.env.local
+.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# IDE and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,73 @@
+@keyframes rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes zoomInOut {
+  0% {
+    transform: scale(0.5);
+  }
+  50% {
+    transform: scale(1);
+  }
+  100% {
+    transform: scale(0.5);
+  }
+}
+
+@keyframes colorChange {
+  0% {
+    background-color: #ffffff;
+  }
+  50% {
+    background-color: #ff4d4d;
+  }
+  100% {
+    background-color: #ff0000;
+  }
+}
+
+@keyframes slideIn {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.rotate {
+  animation: rotate 1s linear infinite;
+}
+
+.bounce {
+  animation: bounce 1s infinite ease-in-out;
+}
+
+.zoomInOut {
+  animation: zoomInOut 2s infinite ease-in-out;
+}
+
+.colorChange {
+  animation: colorChange 2s infinite ease-in-out;
+}
+
+.slideIn {
+  animation: slideIn 1s ease-out forwards;
+}
