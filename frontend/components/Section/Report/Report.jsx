@@ -1,313 +1,176 @@
-import React, { useState } from 'react';
-import {
-    TextField,
-    MenuItem,
-    Button,
-    Grid,
-    Typography,
-    Paper,
-    Divider,
-    useTheme,
-    Snackbar,
-    Alert
-} from '@mui/material';
-import DownloadIcon from '@mui/icons-material/Download';
-import ClearAllIcon from '@mui/icons-material/ClearAll';
-import FilterAltIcon from '@mui/icons-material/FilterAlt';
-import { fetchReports } from '../../../utils/api';
+import React, { useState } from "react";
+import { Box, Grid, Tabs, Tab, Typography } from "@mui/material";
+import Inventory2Outlined from "@mui/icons-material/Inventory2Outlined";
+import InsightsOutlined from "@mui/icons-material/InsightsOutlined";
+import GpsFixed from "@mui/icons-material/GpsFixed";
+import AssignmentOutlined from "@mui/icons-material/AssignmentOutlined";
+
+import Header from "../../Layout/Header/Header";
+import ReportKpiCard from "./Reportkpicard/Reportkpicard";
+import ProductionTrend from "./Productiontrend/Productiontrend";
+import EfficiencyTrend from "./Efficiencytrend/Efficiencytrend";
+import OutputByProduct from "./Outputbyproduct/Outputbyproduct";
+import TopLossReasons from "./Toplossreasons/Toplossreasons";
+import OutputByShift from "./Outputbyshift/Outputbyshift";
+import QuickReports from "./Quickreports/Quickreports";
+import ScheduleReports from "./Schedulereports/Schedulereports";
+import RecentReports from "./Recentreports/Recentreports";
+import DataDrivenImprovement from "./Datadrivenimprovement/Datadrivenimprovement";
+
+const TABS = [
+  "Production",
+  "Operator",
+  "Loss Analysis",
+  "SOP Compliance",
+  "Custom Report",
+];
+
+const kpis = [
+  {
+    label: "Total Output",
+    value: "18,420",
+    delta: "12%",
+    trend: "up",
+    sub: "vs. previous period",
+    icon: <Inventory2Outlined />,
+  },
+  {
+    label: "Average Output / Hour",
+    value: "154",
+    delta: "8%",
+    trend: "up",
+    sub: "vs. previous period",
+    icon: <InsightsOutlined />,
+  },
+  {
+    label: "Overall Efficiency",
+    value: "88%",
+    delta: "6%",
+    trend: "up",
+    sub: "vs. previous period",
+    icon: <GpsFixed />,
+  },
+  {
+    label: "SOP Adherence",
+    value: "92%",
+    delta: "4%",
+    trend: "up",
+    sub: "vs. previous period",
+    icon: <AssignmentOutlined />,
+  },
+];
+
+function ProductionTab() {
+  return (
+    <Grid container spacing={2}>
+      {/* KPIs */}
+      {kpis.map((k) => (
+        <Grid size={{ xs: 12, sm: 6, md: 3 }} key={k.label}>
+          <ReportKpiCard {...k} />
+        </Grid>
+      ))}
+
+      {/* Trends */}
+      <Grid size={{ xs: 12, lg: 6 }}>
+        <ProductionTrend />
+      </Grid>
+      <Grid size={{ xs: 12, lg: 6 }}>
+        <EfficiencyTrend />
+      </Grid>
+
+      {/* Bar panels */}
+      <Grid size={{ xs: 12, md: 6, lg: 4 }}>
+        <OutputByProduct />
+      </Grid>
+      <Grid size={{ xs: 12, md: 6, lg: 4 }}>
+        <TopLossReasons />
+      </Grid>
+      <Grid size={{ xs: 12, md: 12, lg: 4 }}>
+        <OutputByShift />
+      </Grid>
+    </Grid>
+  );
+}
 
 const Report = () => {
-    const theme = useTheme();
-    const isDarkMode = theme.palette.mode === "dark";
+  const [tab, setTab] = useState(0);
 
-    const [filters, setFilters] = useState({
-        line_id: '',
-        station_id: '',
-        // shift_id: '',
-        product_name: '',
-        start_time: '',
-        end_time: '',
-        // severity: ''
-    });
-
-    const [notification, setNotification] = useState({
-        open: false,
-        message: '',
-        severity: 'success',
-    });
-
-    const handleNotificationClose = () => {
-        setNotification(prev => ({ ...prev, open: false }));
-    };
-
-    const handleChange = (e) => {
-        const { name, value } = e.target;
-        setFilters(prev => ({ ...prev, [name]: value }));
-    };
-
-    const handleClear = () => {
-        setFilters({
-            line_id: '',
-            station_id: '',
-            // shift_id: '',
-            product_name: '',
-            start_time: '',
-            end_time: '',
-            // severity: '',
-        });
-    };
-
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!filters.line_id.trim()) {
-            setNotification({
-                open: true,
-                message: "Line ID is required.",
-                severity: "warning",
-            });
-            return;
+  return (
+    <>
+      <Header
+        title={"Reports & Trends"}
+        description={
+          "Access detailed reports and trends for data-driven decision making"
         }
+      />
 
-        if (
-            (filters.start_time && !filters.end_time) ||
-            (!filters.start_time && filters.end_time)
-        ) {
-            setNotification({
-                open: true,
-                message: "Please select both Start Time and End Time.",
-                severity: "warning",
-            });
-            return;
-        }
-
-        try {
-            const requestPayload = {
-                line_id: filters.line_id,
-                station_id: filters.station_id,
-                // shift_id: filters.shift_id,
-                product_name: filters.product_name,
-                start_time: filters.start_time,
-                end_time: filters.end_time,
-                // severity: filters.severity,   // ✅ NEW
-            };
-
-            const { blob, contentType } = await fetchReports(requestPayload);
-
-
-            // console.log(`${contentType} IS THE CURRENT FORMAT COMMING FROM BACKEND`);
-
-
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            link.href = url;
-            // ✅ Decide extension based on backend response
-            let fileName = "station_report";
-
-            if (contentType.includes("pdf")) {
-                fileName += ".pdf";
-            } else if (contentType.includes("csv")) {
-                fileName += ".csv";
-            } else {
-                fileName += ".dat"; // fallback
-            }
-            link.setAttribute("download", fileName);
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            setNotification({
-                open: true,
-                message: 'Report downloaded successfully!',
-                severity: 'success',
-            });
-        } catch (err) {
-            console.error(err);
-            setNotification({
-                open: true,
-                message: 'Failed to fetch report',
-                severity: 'error',
-            });
-        }
-    };
-
-    const isSubmitDisabled = !(
-        filters.line_id ||
-        filters.station_id ||
-        // filters.shift_id ||
-        filters.product_name ||
-        filters.start_time ||
-        filters.end_time
-        // filters.severity
-    );
-
-    return (
-        <Paper
-            elevation={6}
-            sx={{
-                p: 4,
-                maxWidth: 900,
-                margin: 'auto',
-                mt: 5,
-                borderRadius: 3,
-                bgcolor: isDarkMode ? 'background.paper' : '#ffffff',
-            }}
+      <Box sx={{ p: { xs: 1.5, md: 2.5 } }}>
+        {/* Tabs */}
+        <Tabs
+          value={tab}
+          onChange={(e, v) => setTab(v)}
+          variant="scrollable"
+          scrollButtons="auto"
+          sx={{
+            mb: 2,
+            minHeight: 40,
+            "& .MuiTab-root": {
+              textTransform: "none",
+              fontSize: 14,
+              fontWeight: 600,
+              minHeight: 40,
+              px: 2,
+            },
+            "& .Mui-selected": { color: "#008a67 !important" },
+            "& .MuiTabs-indicator": { backgroundColor: "#008a67" },
+          }}
         >
+          {TABS.map((t) => (
+            <Tab key={t} label={t} />
+          ))}
+        </Tabs>
 
-            <Typography
-                variant="h6"
+        <Grid container spacing={2}>
+          {/* Main tab content */}
+          <Grid size={{ xs: 12, lg: 9 }}>
+            {tab === 0 ? (
+              <ProductionTab />
+            ) : (
+              <Box
                 sx={{
-                    pb: 1,
-                    fontWeight: 'bold',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 1,
-                    textTransform: 'uppercase'
+                  p: 6,
+                  textAlign: "center",
+                  border: "1px dashed",
+                  borderColor: "divider",
+                  borderRadius: "14px",
                 }}
-            >
-                <FilterAltIcon color="primary" />
-                Station Performance Report
-            </Typography>
+              >
+                <Typography color="text.secondary">
+                  {TABS[tab]} report — coming soon.
+                </Typography>
+              </Box>
+            )}
+          </Grid>
 
-            <Divider sx={{ mb: 2 }} />
+          {/* Sidebar */}
+          <Grid size={{ xs: 12, lg: 3 }}>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <QuickReports onSelect={() => setTab(0)} />
+              <ScheduleReports />
+            </Box>
+          </Grid>
 
-            <form onSubmit={handleSubmit}>
-                <Grid container spacing={2}>
-
-                    <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            label="Line ID (e.g. L-01)"
-                            name="line_id"
-                            value={filters.line_id}
-                            onChange={handleChange}
-                        />
-                    </Grid>
-
-                    <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            label="Station ID (e.g. S-01)"
-                            name="station_id"
-                            value={filters.station_id}
-                            onChange={handleChange}
-                        />
-                    </Grid>
-
-                    {/* <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            label="Shift ID"
-                            name="shift_id"
-                            value={filters.shift_id}
-                            onChange={handleChange}
-                        />
-                    </Grid> */}
-
-                    <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            label="Product Name"
-                            name="product_name"
-                            value={filters.product_name}
-                            onChange={handleChange}
-                        />
-                    </Grid>
-
-                    {/* <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            select
-                            label="Severity"
-                            name="severity"
-                            value={filters.severity}
-                            onChange={handleChange}
-                        >
-                            <MenuItem value="">All</MenuItem>
-                            <MenuItem value="RED">Critical (Red)</MenuItem>
-                            <MenuItem value="YELLOW">Warning (Yellow)</MenuItem>
-                        </TextField>
-                    </Grid> */}
-
-                    <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            type="datetime-local"
-                            label="Start Time"
-                            name="start_time"
-                            value={filters.start_time}
-                            onChange={handleChange}
-                            InputLabelProps={{ shrink: true }}
-                        />
-                    </Grid>
-
-                    <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            type="datetime-local"
-                            label="End Time"
-                            name="end_time"
-                            value={filters.end_time}
-                            onChange={handleChange}
-                            InputLabelProps={{ shrink: true }}
-                        />
-                    </Grid>
-
-                       {/* ADDING FORMAT OPTION  */}
-                    <Grid size={{ xs: 12 }}>
-                        <TextField
-                            fullWidth
-                            select
-                            label="Report Format"
-                            name="report_format"
-                            value={filters.report_format}
-                            onChange={handleChange}
-                        >
-                            <MenuItem value="pdf">
-                                📄 PDF Report
-                            </MenuItem>
-
-                            <MenuItem value="csv">
-                                📊 CSV Report
-                            </MenuItem>
-                        </TextField>
-                    </Grid>
-
-                    <Grid size={{ xs: 12 }} sx={{ mt: 3, display: 'flex', gap: 2 }}>
-                        <Button
-                            variant="outlined"
-                            fullWidth
-                            onClick={handleClear}
-                            startIcon={<ClearAllIcon />}
-                        >
-                            Clear Filters
-                        </Button>
-
-                        <Button
-                            variant="contained"
-                            color="success"
-                            fullWidth
-                            type="submit"
-                            startIcon={<DownloadIcon />}
-                            disabled={isSubmitDisabled}
-                        >
-                            Generate Report
-                        </Button>
-                    </Grid>
-                </Grid>
-            </form>
-
-            <Snackbar
-                open={notification.open}
-                autoHideDuration={4000}
-                onClose={handleNotificationClose}
-                anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
-            >
-                <Alert onClose={handleNotificationClose} severity={notification.severity}>
-                    {notification.message}
-                </Alert>
-            </Snackbar>
-        </Paper>
-    );
+          {/* Bottom row */}
+          <Grid size={{ xs: 12, lg: 8 }}>
+            <RecentReports />
+          </Grid>
+          <Grid size={{ xs: 12, lg: 4 }}>
+            <DataDrivenImprovement />
+          </Grid>
+        </Grid>
+      </Box>
+    </>
+  );
 };
 
 export default Report;
