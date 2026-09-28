@@ -1,0 +1,62 @@
+# CMake / build artifacts
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+_deps/
+
+# Compiled objects, libraries, executables
+*.o
+*.obj
+*.d
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+*.exe
+*.out
+towel
+
+# Model files (large binaries)
+models/*.onnx
+*.onnx
+*.pt
+*.engine
+*.trt
+*.mp4
+*.avi
+
+# Runtime output
+output/
+*.mp4
+*.avi
+
+# Database files
+db/data/*.db
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Logs
+*.log
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.clangd/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,418 @@
+{
+  "_comment": "Replace rtsp_url with your camera's real stream. All *_model paths are resolved relative to the working directory ctpat is run from (same as the old .onnx filenames were). Every field except rtsp_url / *_model / stations has a built-in default in main_config_utils.c -- you can delete keys you don't need to tune.",
+  "rtsp_url": "rtsp://192.168.2.170:8554/cam1",
+  "active_line": "CTPAT",
+  "person_model": "models/yolov8n.onnx",
+  "pose_model": "models/yolov8n-pose.onnx",
+  "towel_model": "models/towel.onnx",
+  "save_output_video": true,
+  "output_video_path": "output/output_tracking.mp4",
+  "frame_log_path": "output/frame.txt",
+  "db_path": "db/data/data.db",
+  "api_port": 5001,
+  "person_input_size": 640,
+  "person_conf_threshold": 0.5,
+  "nms_threshold": 0.45,
+  "person_class_id": 0,
+  "towel_input_size": 640,
+  "towel_conf_threshold": 0.5,
+  "towel_class_id": 0,
+  "pose_input_size": 640,
+  "pose_conf_threshold": 0.5,
+  "min_track_box_area": 100.0,
+  "roi_person_overlap_threshold": 0.15,
+  "conveyor_belt_roi": [
+    [
+      246,
+      1246
+    ],
+    [
+      320,
+      1420
+    ],
+    [
+      626,
+      1293
+    ],
+    [
+      513,
+      1123
+    ]
+  ],
+  "towel_line": {
+    "p1": [
+      1025,
+      1051
+    ],
+    "p2": [
+      1396,
+      1515
+    ],
+    "bridge_max_gap_sec": 1.5,
+    "proximity_px": 250.0,
+    "track_max_missed_frames": 90
+  },
+  "stations": {
+    "CTPAT": [
+      {
+        "name": "LOWER_1",
+        "color": [
+          0,
+          255,
+          255
+        ],
+        "roi": [
+          [
+            1295,
+            933
+          ],
+          [
+            1488,
+            1205
+          ],
+          [
+            853,
+            1478
+          ],
+          [
+            668,
+            1176
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_2",
+        "color": [
+          255,
+          0,
+          255
+        ],
+        "roi": [
+          [
+            1295,
+            933
+          ],
+          [
+            1488,
+            1205
+          ],
+          [
+            1855,
+            1021
+          ],
+          [
+            1641,
+            811
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_3",
+        "color": [
+          0,
+          255,
+          0
+        ],
+        "roi": [
+          [
+            1850,
+            1021
+          ],
+          [
+            1641,
+            811
+          ],
+          [
+            1986,
+            670
+          ],
+          [
+            2158,
+            846
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_4",
+        "color": [
+          255,
+          0,
+          0
+        ],
+        "roi": [
+          [
+            2158,
+            846
+          ],
+          [
+            2296,
+            790
+          ],
+          [
+            2123,
+            595
+          ],
+          [
+            1986,
+            670
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_5",
+        "color": [
+          0,
+          165,
+          255
+        ],
+        "roi": [
+          [
+            2245,
+            745
+          ],
+          [
+            2481,
+            900
+          ],
+          [
+            2641,
+            736
+          ],
+          [
+            2420,
+            575
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_6",
+        "color": [
+          255,
+          255,
+          0
+        ],
+        "roi": [
+          [
+            2000,
+            941
+          ],
+          [
+            2313,
+            1220
+          ],
+          [
+            2471,
+            1088
+          ],
+          [
+            2300,
+            808
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_7",
+        "color": [
+          255,
+          128,
+          0
+        ],
+        "roi": [
+          [
+            2000,
+            941
+          ],
+          [
+            2301,
+            1218
+          ],
+          [
+            2051,
+            1511
+          ],
+          [
+            1793,
+            1053
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      },
+      {
+        "name": "LOWER_8",
+        "color": [
+          128,
+          0,
+          255
+        ],
+        "roi": [
+          [
+            1793,
+            1053
+          ],
+          [
+            2051,
+            1511
+          ],
+          [
+            1455,
+            1516
+          ],
+          [
+            1385,
+            1245
+          ]
+        ],
+        "sensitivity": {
+          "track_iou_threshold": 0.3,
+          "track_max_missed_frames": 15,
+          "keypoint_ema_alpha": 0.55,
+          "keypoint_invalid_dropout_frames": 10,
+          "movement_history_window_sec": 0.4,
+          "movement_speed_threshold": 30.0,
+          "upgrade_debounce_frames": 3,
+          "pending_washout_sec": 5.0,
+          "pending_away_washout_sec": 3.5,
+          "away_presence_washout_sec": 1.75,
+          "fallback_active_confirm_sec": 1.75
+        }
+      }
+    ]
+  },
+  "shifts": [
+    {
+      "shift_name": "SHIFT 1",
+      "timings": "06:00 - 14:00",
+      "target_units": 200,
+      "breaks": [
+        {
+          "break_name": "Tea Break",
+          "timings": "08:00 - 08:15"
+        },
+        {
+          "break_name": "Lunch Break",
+          "timings": "11:00 - 11:30"
+        }
+      ]
+    },
+    {
+      "shift_name": "SHIFT 2",
+      "timings": "14:00 - 22:00",
+      "target_units": 200,
+      "breaks": [
+        {
+          "break_name": "Tea Break",
+          "timings": "16:00 - 16:15"
+        },
+        {
+          "break_name": "Dinner Break",
+          "timings": "19:00 - 19:30"
+        }
+      ]
+    },
+    {
+      "shift_name": "SHIFT 3",
+      "timings": "22:00 - 06:00",
+      "target_units": 200,
+      "breaks": [
+        {
+          "break_name": "Tea Break",
+          "timings": "00:00 - 00:15"
+        },
+        {
+          "break_name": "Meal Break",
+          "timings": "03:00 - 03:30"
+        }
+      ]
+    }
+  ]
+}
