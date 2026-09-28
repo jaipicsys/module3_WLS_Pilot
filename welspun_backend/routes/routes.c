@@ -280,6 +280,462 @@ static enum MHD_Result handle_units_produced(struct MHD_Connection *conn)
  * ───────────────────────────────────────────────────────────────── */
 
 /* ═══════════════════════════════════════════════════════════════════
+ * §4.1  SHARED HELPERS FOR DATA HANDLERS
+ *
+ * Used by every real endpoint below. Conventions (same as routes_gt.c):
+ *   - internal linkage for everything (MISRA Rule 8.7)
+ *   - single exit per function (Rule 15.5)
+ *   - every sqlite3_* / snprintf return value checked or cast to void
+ *     (Rule 17.7)
+ *
+ * Tables (data_2.db):
+ *   operator_status(id, line_id, product_name, shift_id, shift_timings,
+ *                   operation, operator_roi_name, cam_id, status,
+ *                   duration, updated_at)
+ *     One row per closed state segment for one operator ROI.
+ *     status   = 'ACTIVE' | 'IDLE' | 'AWAY'
+ *     duration = seconds (REAL)
+ *     updated_at = 'YYYY-MM-DD HH:MM:SS'
+ *
+ *   product_produced(id, line_id, product_name, shift_id,
+ *                    shift_timings, updated_at)
+ *     One row per unit produced.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Round to a fixed number of decimals without needing <math.h>/-lm.
+ * scale = 10.0 -> 1 decimal, 100.0 -> 2 decimals. */
+static double round_to(double value, double scale)
+{
+    double scaled = value * scale;
+    long long rounded;
+
+    if (scaled >= 0.0)
+    {
+        rounded = (long long)(scaled + 0.5);
+    }
+    else
+    {
+        rounded = (long long)(scaled - 0.5);
+    }
+    return (double)rounded / scale;
+}
+
+/* Safe percentage: part / whole * 100, 0 when whole is 0. */
+static double pct_of(double part, double whole)
+{
+    double pct = 0.0;
+
+    if (whole > 0.0)
+    {
+        pct = (part / whole) * 100.0;
+    }
+    return pct;
+}
+
+/* Seconds -> "6h 12m" (or "18m" under an hour), nearest minute. */
+static void format_hm(double total_secs, char *out, size_t out_sz)
+{
+    double secs = (total_secs > 0.0) ? total_secs : 0.0;
+    long long total_mins = (long long)((secs / 60.0) + 0.5);
+    long long hours = total_mins / 60LL;
+    long long mins = total_mins % 60LL;
+
+    if (hours > 0LL)
+    {
+        (void)snprintf(out, out_sz, "%lldh %lldm", hours, mins);
+    }
+    else
+    {
+        (void)snprintf(out, out_sz, "%lldm", mins);
+    }
+}
+
+/* Runs a single-value SELECT. Returns 1 on success, 0 on SQL error.
+ * A NULL result (e.g. MAX() over an empty table) comes back as 0. */
+static int32_t db_scalar_int64(sqlite3 *db, const char *sql, long long *out)
+{
+    sqlite3_stmt *stmt = NULL;
+    int32_t ok = 0;
+
+    *out = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK)
+    {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            if (sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            {
+                *out = (long long)sqlite3_column_int64(stmt, 0);
+            }
+            ok = 1;
+        }
+    }
+    if (ok == 0)
+    {
+        (void)fprintf(stderr, "[routes] query failed: %s\n  SQL: %s\n",
+                      sqlite3_errmsg(db), sql);
+    }
+    (void)sqlite3_finalize(stmt);
+    return ok;
+}
+
+static int32_t db_scalar_double(sqlite3 *db, const char *sql, double *out)
+{
+    sqlite3_stmt *stmt = NULL;
+    int32_t ok = 0;
+
+    *out = 0.0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK)
+    {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            if (sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            {
+                *out = sqlite3_column_double(stmt, 0);
+            }
+            ok = 1;
+        }
+    }
+    if (ok == 0)
+    {
+        (void)fprintf(stderr, "[routes] query failed: %s\n  SQL: %s\n",
+                      sqlite3_errmsg(db), sql);
+    }
+    (void)sqlite3_finalize(stmt);
+    return ok;
+}
+
+/* Serialises a cJSON tree, sends it through send_response() (so it
+ * gets the same CORS headers as everything else), and frees both the
+ * tree and the printed string. Always consumes `root`. */
+static enum MHD_Result send_cjson(struct MHD_Connection *conn,
+                                  int status,
+                                  cJSON *root)
+{
+    char *body = NULL;
+    enum MHD_Result ret;
+
+    if (root != NULL)
+    {
+        body = cJSON_PrintUnformatted(root);
+    }
+
+    if (body == NULL)
+    {
+        ret = json_msg(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "error", "JSON build failed");
+    }
+    else
+    {
+        ret = send_response(conn, status, body);
+        cJSON_free(body);
+    }
+
+    cJSON_Delete(root);
+    return ret;
+}
+
+/* Adds {"seconds": 3888.0, "display": "1h 5m"} under `key`.
+ * Standard shape for any duration value in a response. */
+static void json_add_duration(cJSON *root, const char *key, double seconds)
+{
+    cJSON *obj = cJSON_AddObjectToObject(root, key);
+    char display[32];
+
+    if (obj != NULL)
+    {
+        format_hm(seconds, display, sizeof(display));
+        (void)cJSON_AddNumberToObject(obj, "seconds", round_to(seconds, 10.0));
+        (void)cJSON_AddStringToObject(obj, "display", display);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * §4.2  OVERVIEW PAGE
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ── GET /api/overview/kpi-cards ──────────────────────────────────────
+ *
+ * The six KPI cards across the top of the Overview page.
+ *
+ * Total Output     COUNT(*) of product_produced.
+ *                  change_pct: 0 for now (no previous-shift comparison yet).
+ *
+ * Output / Hour    Total Output / hours covered by operator_status,
+ *                  where hours = MAX(updated_at) - MIN(updated_at).
+ *                  change_pct: 0 for now.
+ *
+ * Productive Time  SUM(duration) of operator_status rows with
+ *                  status = 'ACTIVE'.
+ *                  pct = COUNT(ACTIVE rows) / COUNT(all rows) * 100.
+ *
+ * Idle / Waiting   Same as Productive Time, status = 'IDLE'.
+ *
+ * Efficiency       value = Productive Time's pct.
+ *                  change_pct: 0 for now.
+ *
+ * SOP Adherence    value 0, change_pct 0 (placeholder).
+ *
+ * Response:
+ * {
+ *   "total_output":    { "value": 29,     "change_pct": 0 },
+ *   "output_per_hour": { "value": 141.1,  "change_pct": 0 },
+ *   "productive_time": { "seconds": 3888.0, "display": "1h 5m",
+ *                        "pct_of_available": 39.1 },
+ *   "idle_time":       { "seconds": 935.8,  "display": "16m",
+ *                        "pct_of_available": 43.5 },
+ *   "efficiency":      { "value_pct": 39.1, "change_pct": 0 },
+ *   "sop_adherence":   { "value_pct": 0,    "change_pct": 0 }
+ * }
+ * ─────────────────────────────────────────────────────────────────── */
+
+typedef struct
+{
+    long long total_rows;
+    long long active_rows;
+    double active_secs;
+    long long idle_rows;
+    double idle_secs;
+} KpiStatusTotals_t;
+
+/* One pass over operator_status for both the ACTIVE and IDLE cards. */
+static int32_t kpi_query_status_totals(sqlite3 *db, KpiStatusTotals_t *t)
+{
+    static const char *SQL =
+        "SELECT COUNT(*), "
+        "       COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END), 0), "
+        "       COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN duration ELSE 0.0 END), 0.0), "
+        "       COALESCE(SUM(CASE WHEN status = 'IDLE' THEN 1 ELSE 0 END), 0), "
+        "       COALESCE(SUM(CASE WHEN status = 'IDLE' THEN duration ELSE 0.0 END), 0.0) "
+        "FROM operator_status;";
+    sqlite3_stmt *stmt = NULL;
+    int32_t ok = 0;
+
+    (void)memset(t, 0, sizeof(*t));
+    if (sqlite3_prepare_v2(db, SQL, -1, &stmt, NULL) == SQLITE_OK)
+    {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            t->total_rows = (long long)sqlite3_column_int64(stmt, 0);
+            t->active_rows = (long long)sqlite3_column_int64(stmt, 1);
+            t->active_secs = sqlite3_column_double(stmt, 2);
+            t->idle_rows = (long long)sqlite3_column_int64(stmt, 3);
+            t->idle_secs = sqlite3_column_double(stmt, 4);
+            ok = 1;
+        }
+    }
+    if (ok == 0)
+    {
+        (void)fprintf(stderr, "[routes] kpi status totals failed: %s\n",
+                      sqlite3_errmsg(db));
+    }
+    (void)sqlite3_finalize(stmt);
+    return ok;
+}
+
+/* Adds {"value": v, "change_pct": c} under `key`. */
+static void kpi_add_value_card(cJSON *root, const char *key,
+                               double value, double change_pct)
+{
+    cJSON *card = cJSON_AddObjectToObject(root, key);
+
+    if (card != NULL)
+    {
+        (void)cJSON_AddNumberToObject(card, "value", value);
+        (void)cJSON_AddNumberToObject(card, "change_pct", change_pct);
+    }
+}
+
+/* Adds {"value_pct": v, "change_pct": c} under `key`. */
+static void kpi_add_pct_card(cJSON *root, const char *key,
+                             double value_pct, double change_pct)
+{
+    cJSON *card = cJSON_AddObjectToObject(root, key);
+
+    if (card != NULL)
+    {
+        (void)cJSON_AddNumberToObject(card, "value_pct", value_pct);
+        (void)cJSON_AddNumberToObject(card, "change_pct", change_pct);
+    }
+}
+
+/* Adds {"seconds": s, "display": "6h 12m", "pct_of_available": p}. */
+static void kpi_add_time_card(cJSON *root, const char *key,
+                              double seconds, double pct)
+{
+    cJSON *card = cJSON_AddObjectToObject(root, key);
+    char display[32];
+
+    if (card != NULL)
+    {
+        format_hm(seconds, display, sizeof(display));
+        (void)cJSON_AddNumberToObject(card, "seconds", round_to(seconds, 10.0));
+        (void)cJSON_AddStringToObject(card, "display", display);
+        (void)cJSON_AddNumberToObject(card, "pct_of_available", round_to(pct, 10.0));
+    }
+}
+
+static enum MHD_Result handle_overview_kpi_cards(struct MHD_Connection *conn)
+{
+    sqlite3 *db = db_get_handle();
+    enum MHD_Result ret;
+    int32_t ok = 0;
+    long long total_output = 0;
+    double window_hours = 0.0;
+    double output_per_hour = 0.0;
+    double productive_pct = 0.0;
+    double idle_pct = 0.0;
+    KpiStatusTotals_t st;
+    cJSON *root = NULL;
+
+    (void)memset(&st, 0, sizeof(st));
+
+    if (db == NULL)
+    {
+        ret = json_msg(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "error", "DB not open");
+    }
+    else
+    {
+        ok = db_scalar_int64(db,
+                             "SELECT COUNT(*) FROM product_produced;",
+                             &total_output);
+
+        if (ok != 0)
+        {
+            ok = db_scalar_double(db,
+                                  "SELECT (julianday(MAX(updated_at)) - julianday(MIN(updated_at))) * 24.0 "
+                                  "FROM operator_status;",
+                                  &window_hours);
+        }
+
+        if (ok != 0)
+        {
+            ok = kpi_query_status_totals(db, &st);
+        }
+
+        if (ok == 0)
+        {
+            ret = json_msg(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "error", "query failed");
+        }
+        else
+        {
+            if (window_hours > 0.0)
+            {
+                output_per_hour = (double)total_output / window_hours;
+            }
+            productive_pct = pct_of((double)st.active_rows, (double)st.total_rows);
+            idle_pct = pct_of((double)st.idle_rows, (double)st.total_rows);
+
+            root = cJSON_CreateObject();
+            if (root != NULL)
+            {
+                kpi_add_value_card(root, "total_output", (double)total_output, 0.0);
+                kpi_add_value_card(root, "output_per_hour", round_to(output_per_hour, 10.0), 0.0);
+                kpi_add_time_card(root, "productive_time", st.active_secs, productive_pct);
+                kpi_add_time_card(root, "idle_time", st.idle_secs, idle_pct);
+                kpi_add_pct_card(root, "efficiency", round_to(productive_pct, 10.0), 0.0);
+                kpi_add_pct_card(root, "sop_adherence", 0.0, 0.0);
+            }
+            ret = send_cjson(conn, MHD_HTTP_OK, root);
+        }
+    }
+
+    return ret;
+}
+
+/* ── GET /api/overview/time-distribution ──────────────────────────────
+ *
+ * Donut chart on the Overview page: total time spent in each status.
+ *
+ * productive  SUM(duration) of operator_status rows, status = 'ACTIVE'
+ * idle        SUM(duration) of operator_status rows, status = 'IDLE'
+ * away        SUM(duration) of operator_status rows, status = 'AWAY'
+ * total       SUM(duration) of ALL operator_status rows
+ *
+ * Times only -- the frontend derives the percentages from these.
+ *
+ * Response:
+ * {
+ *   "productive": { "seconds": 3888.0, "display": "1h 5m"  },
+ *   "idle":       { "seconds": 935.8,  "display": "16m"    },
+ *   "away":       { "seconds": 466.5,  "display": "8m"     },
+ *   "total":      { "seconds": 5290.3, "display": "1h 28m" }
+ * }
+ * ─────────────────────────────────────────────────────────────────── */
+
+typedef struct
+{
+    double active_secs;
+    double idle_secs;
+    double away_secs;
+    double total_secs;
+} TimeDistTotals_t;
+
+/* One pass over operator_status for all four totals. */
+static int32_t td_query_totals(sqlite3 *db, TimeDistTotals_t *t)
+{
+    static const char *SQL =
+        "SELECT COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN duration ELSE 0.0 END), 0.0), "
+        "       COALESCE(SUM(CASE WHEN status = 'IDLE'   THEN duration ELSE 0.0 END), 0.0), "
+        "       COALESCE(SUM(CASE WHEN status = 'AWAY'   THEN duration ELSE 0.0 END), 0.0), "
+        "       COALESCE(SUM(duration), 0.0) "
+        "FROM operator_status;";
+    sqlite3_stmt *stmt = NULL;
+    int32_t ok = 0;
+
+    (void)memset(t, 0, sizeof(*t));
+    if (sqlite3_prepare_v2(db, SQL, -1, &stmt, NULL) == SQLITE_OK)
+    {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            t->active_secs = sqlite3_column_double(stmt, 0);
+            t->idle_secs = sqlite3_column_double(stmt, 1);
+            t->away_secs = sqlite3_column_double(stmt, 2);
+            t->total_secs = sqlite3_column_double(stmt, 3);
+            ok = 1;
+        }
+    }
+    if (ok == 0)
+    {
+        (void)fprintf(stderr, "[routes] time distribution query failed: %s\n",
+                      sqlite3_errmsg(db));
+    }
+    (void)sqlite3_finalize(stmt);
+    return ok;
+}
+
+static enum MHD_Result handle_overview_time_distribution(struct MHD_Connection *conn)
+{
+    sqlite3 *db = db_get_handle();
+    enum MHD_Result ret;
+    TimeDistTotals_t td;
+    cJSON *root = NULL;
+
+    (void)memset(&td, 0, sizeof(td));
+
+    if (db == NULL)
+    {
+        ret = json_msg(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "error", "DB not open");
+    }
+    else if (td_query_totals(db, &td) == 0)
+    {
+        ret = json_msg(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "error", "query failed");
+    }
+    else
+    {
+        root = cJSON_CreateObject();
+        if (root != NULL)
+        {
+            json_add_duration(root, "productive", td.active_secs);
+            json_add_duration(root, "idle", td.idle_secs);
+            json_add_duration(root, "away", td.away_secs);
+            json_add_duration(root, "total", td.total_secs);
+        }
+        ret = send_cjson(conn, MHD_HTTP_OK, root);
+    }
+
+    return ret;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * §5  PUBLIC ENTRY POINTS  (wired into MHD_start_daemon in ctpat.cpp)
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -369,6 +825,22 @@ enum MHD_Result routes_connection_handler(
     {
         if (strcmp(method, "GET") == 0)
             ret = handle_units_produced(connection);
+    }
+
+    /* ── Overview page ───────────────────────────────────────────────── */
+    else if (strcmp(url, "/api/overview/kpi-cards") == 0)
+    {
+        if (strcmp(method, "GET") == 0)
+        {
+            ret = handle_overview_kpi_cards(connection);
+        }
+    }
+    else if (strcmp(url, "/api/overview/time-distribution") == 0)
+    {
+        if (strcmp(method, "GET") == 0)
+        {
+            ret = handle_overview_time_distribution(connection);
+        }
     }
     /*
      * TODO: else if (strcmp(url, "/api/your-endpoint") == 0) { ... }
