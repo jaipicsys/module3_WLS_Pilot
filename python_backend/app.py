@@ -19,6 +19,8 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as file:
 FLASK_HOST = CONFIG.get("host", "0.0.0.0")
 FLASK_PORT = CONFIG.get("flask_port", 5000)
 CAMERA_CONFIG = CONFIG.get("rtsp_urls", {})
+ENABLE_DISPLAY = CONFIG.get("enable_display", False)
+DISPLAY_SCALE = CONFIG.get("display_scale", 0.6)
 
 
 app = Flask(__name__)
@@ -40,7 +42,11 @@ if __name__ == "__main__":
     init_all_databases()
 
     # Start configured cameras in background threads.
-    manager = CameraManager(CAMERA_CONFIG)
+    manager = CameraManager(
+        CAMERA_CONFIG,
+        enable_display=CONFIG.get("enable_display", False),
+        display_scale=CONFIG.get("display_scale", 0.6),
+    )
     manager.start_all()
 
     # Start Flask without the development reloader.

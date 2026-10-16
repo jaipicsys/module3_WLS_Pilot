@@ -1,12 +1,12 @@
 {
   "host": "0.0.0.0",
   "flask_port": 5001,
+  "enable_display": true,
+  "display_scale": 0.6,
   "plant": "Unit 1 Textile",
 
   "rtsp_urls": {
-    "cam1": "rtsp://192.168.2.8:8554/cam1",
-    "cam2": "rtsp://192.168.2.10:8554/cam2",
-    "cam3": "rtsp://192.168.2.11:8554/cam3"
+    "cam1": "rtsp://192.168.2.237:8554/cam1"
   },
 
   "models_dir": "models",
@@ -38,7 +38,7 @@
           "shift_name": "SHIFT 1",
           "timings": "06:00 - 14:00",
           "breaks": [
-            { "break_name": "Tea Break",   "timings": "08:00 - 08:15" },
+            { "break_name": "Tea Break", "timings": "08:00 - 08:15" },
             { "break_name": "Lunch Break", "timings": "11:00 - 11:30" }
           ]
         },
@@ -47,7 +47,7 @@
           "shift_name": "SHIFT 2",
           "timings": "14:00 - 22:00",
           "breaks": [
-            { "break_name": "Tea Break",    "timings": "16:00 - 16:15" },
+            { "break_name": "Tea Break", "timings": "16:00 - 16:15" },
             { "break_name": "Dinner Break", "timings": "19:00 - 19:30" }
           ]
         },
@@ -56,16 +56,28 @@
           "shift_name": "SHIFT 3",
           "timings": "22:00 - 06:00",
           "breaks": [
-            { "break_name": "Tea Break",  "timings": "00:00 - 00:15" },
+            { "break_name": "Tea Break", "timings": "00:00 - 00:15" },
             { "break_name": "Meal Break", "timings": "03:00 - 03:30" }
           ]
         }
       ],
 
       "stations": {
-        "ST01": { "station_name": "Station 1", "camera": "cam1", "operation": "CAA" },
-        "ST02": { "station_name": "Station 2", "camera": "cam2", "operation": "EOL" },
-        "ST03": { "station_name": "Station 3", "camera": "cam3", "operation": "INSPECTION" }
+        "ST01": {
+          "station_name": "Station 1",
+          "camera": "cam1",
+          "operation": "CAA"
+        },
+        "ST02": {
+          "station_name": "Station 2",
+          "camera": "cam2",
+          "operation": "EOL"
+        },
+        "ST03": {
+          "station_name": "Station 3",
+          "camera": "cam3",
+          "operation": "INSPECTION"
+        }
       }
     }
   }

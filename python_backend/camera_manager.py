@@ -6,7 +6,12 @@ from threading import Lock, Thread
 from logics import CameraProcessor
 
 class CameraManager:
-    def __init__(self, camera_config):
+    def __init__(
+        self,
+        camera_config,
+        enable_display=False,
+        display_scale=0.6,
+    ):
         self.processors = {}
         self.threads = {}
         self._restart_lock = Lock()
@@ -17,6 +22,8 @@ class CameraManager:
                 camera_id=cam_id,
                 rtsp_url=rtsp_url,
                 on_done_callback=self.on_camera_done,
+                enable_display=enable_display,
+                display_scale=display_scale,
             )
 
             self.processors[cam_id] = processor
