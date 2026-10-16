@@ -27,3 +27,6 @@ env/
 
 # Recordings
 recordings/
+
+# Models
+models/

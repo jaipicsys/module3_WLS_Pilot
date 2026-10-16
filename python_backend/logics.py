@@ -23,15 +23,16 @@ ACTIVE = "active_work"
 IDLE = "idle"
 
 # COCO keypoints: left/right elbow, left/right wrist
-ARM_KEYPOINTS = [7, 8, 9, 10]
+ARM_KEYPOINTS = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# Box colors (BGR) per wel.pt class name
+# Box colors (BGR) per model class name
 OBJECT_COLORS = {
     "towel": (255, 160, 0),
     "closed_box": (0, 165, 255),
     "trolly_box": (255, 0, 200),
+    "yellow_person": (0, 255, 255),
 }
 
 # Per-operator labels on the display video
@@ -103,9 +104,10 @@ class FrameLogic:
     """
     Per-camera logic.
 
-    wel.pt   -> detects Person / Towel / Closed_Box / Trolly_Box (ByteTrack)
+    model    -> detects Person / Towel / Closed_Box / Trolly_Box / Yellow_Person
+                (ignored classes such as Inspection_Person are never tracked)
     ids      -> raw tracker ids are mapped to stable operator ids (OP1..OPn)
-    pose     -> runs only on the crop of each operator inside the station ROI
+    pose     -> arm movement of each operator inside the station ROI
     Output   -> one operator_status row per operator (ACTIVE / IDLE segments)
     """
 
@@ -136,6 +138,7 @@ class FrameLogic:
         self.max_operators = cfg.get("max_operators", 0)        # 0 = unlimited
         self.reid_seconds = cfg.get("reid_seconds", 20)
         self.reid_distance = cfg.get("reid_distance", 1.0)      # in body heights
+        self.ignore_names = [n.lower() for n in cfg.get("ignore_classes", [])]
         self.draw = CONFIG.get("enable_display", False)
 
         # ---- device (GPU if available) ----
@@ -154,19 +157,34 @@ class FrameLogic:
 
         # ---- models ----
         op_cfg = CONFIG["operations"][self.station["operation"]]
-        self.det_conf = op_cfg.get("conf_thresh", 0.6)           # towel / boxes
+        self.det_conf = op_cfg.get("conf_thresh", 0.6)            # objects
         self.person_conf = cfg.get("person_conf", self.det_conf)  # people
         self.track_conf = min(self.det_conf, self.person_conf)
 
         self.det_model = YOLO(resolve_model_path(op_cfg["model"]))
         self.pose_model = YOLO(resolve_model_path(CONFIG["pose_model"]))
 
-        # Find the person class id from the model's own class names
-        self.names = self.det_model.names  # {0: 'Person', 1: 'Towel', ...}
-        person_ids = [i for i, n in self.names.items() if n.lower() == "person"]
+        # Find class ids from the model's own class names
+        self.names = self.det_model.names
+        lower_names = {i: n.lower() for i, n in self.names.items()}
+
+        person_ids = [i for i, n in lower_names.items() if n == "person"]
         if not person_ids:
             raise ValueError(f"'Person' class not found in model: {self.names}")
         self.person_class = person_ids[0]
+
+        # Classes to ignore completely (e.g. Inspection_Person)
+        unknown = [n for n in self.ignore_names if n not in lower_names.values()]
+        if unknown:
+            raise ValueError(
+                f"ignore_classes {unknown} not found in model: {self.names}"
+            )
+        ignore_ids = {i for i, n in lower_names.items() if n in self.ignore_names}
+
+        # Only these classes are given to the tracker
+        self.track_classes = [i for i in self.names if i not in ignore_ids]
+        print(f"[INFO] {camera_id}: tracking {[self.names[i] for i in self.track_classes]}, "
+              f"ignoring {[self.names[i] for i in sorted(ignore_ids)]}")
 
         # ---- stable operator ids ----
         self.id_map = {}        # raw tracker id -> stable id
@@ -184,8 +202,6 @@ class FrameLogic:
 
         self._update_operators(persons, now)
 
-        # Later: use `objects` (towel / closed box / trolly box) for counting.
-
         if self.draw:
             self._draw(frame, persons, objects)
 
@@ -202,12 +218,13 @@ class FrameLogic:
         return cv2.pointPolygonTest(self.roi_np, self._anchor(box), False) >= 0
 
     def _detect(self, frame, now):
-        """wel.pt detects everything; pose runs only on operators inside the ROI."""
+        """Model detects everything; pose runs only on operators inside the ROI."""
         result = self.det_model.track(
             frame,
             persist=True,
             tracker=self.tracker,
             conf=self.track_conf,
+            classes=self.track_classes,     # ignored classes never reach the tracker
             device=self.device,
             half=self.half,
             verbose=False,
@@ -228,13 +245,18 @@ class FrameLogic:
             )
 
             for box, cls, conf, tid in zip(xyxy, classes, confs, ids):
+                name = self.names[cls]
+
+                if name.lower() in self.ignore_names:
+                    continue  # safety net
+
                 inside = self._inside_roi(box)
 
                 if cls != self.person_class:
                     if conf >= self.det_conf:
                         objects.append({
                             "id": tid,
-                            "name": self.names[cls],
+                            "name": name,
                             "conf": float(conf),
                             "box": box,
                             "inside": inside,
@@ -507,7 +529,7 @@ class FrameLogic:
     def _draw(self, frame, persons, objects):
         cv2.polylines(frame, [self.roi_np], True, (0, 255, 255), 4)
 
-        # Towel / boxes
+        # Towel / boxes / other objects
         for o in objects:
             x1, y1, x2, y2 = map(int, o["box"])
             color = OBJECT_COLORS.get(o["name"].lower(), (200, 200, 0))

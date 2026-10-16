@@ -20,11 +20,11 @@
   },
 
   "models_dir": "models",
-  "pose_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/yolov8n-pose.pt",
+  "pose_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/yolov8m-pose.pt",
 
   "operations": {
     "Packing": {
-      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/wel.pt",
+      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_oct12.pt",
       "conf_thresh": 0.6
     }
   },
@@ -41,10 +41,7 @@
     "max_operators": 8,
     "reid_seconds": 20,
     "reid_distance": 1.0,
-    "towel_class": "Towel",
-    "towel_conf": 0.3,
-    "towel_reach": 0.6,
-    "towel_hold_seconds": 3
+    "ignore_classes": ["Inspection_Person"]
   },
 
   "lines": {
