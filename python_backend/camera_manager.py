@@ -3,7 +3,7 @@ import subprocess
 import sys
 import time
 from threading import Lock, Thread
-from logics import CameraProcessor
+from camera_worker import CameraWorker
 
 class CameraManager:
     def __init__(
@@ -18,7 +18,7 @@ class CameraManager:
         self._restart_started = False
 
         for cam_id, rtsp_url in camera_config.items():
-            processor = CameraProcessor(
+            processor = CameraWorker(
                 camera_id=cam_id,
                 rtsp_url=rtsp_url,
                 on_done_callback=self.on_camera_done,
