@@ -2,7 +2,17 @@
   "host": "0.0.0.0",
   "flask_port": 5001,
   "enable_display": false,
-  "display_scale": 0.2,
+  "display_scale": 0.4,
+  "device": "auto",
+  "rtsp_retry_seconds": 3,
+  "record_video": true,
+  "record_dir": "recordings",
+  "record_fps": 10,
+  "record_scale": 0.5,
+  "record_segment_minutes": 10,
+  "record_codec": "MJPG",
+  "record_ext": "avi",
+  "record_retention_days": 7,
   "plant": "Unit 1 Textile",
 
   "rtsp_urls": {
@@ -10,27 +20,37 @@
   },
 
   "models_dir": "models",
-  "pose_model": "yolov8n-pose.onnx",
+  "pose_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/yolov8n-pose.pt",
 
   "operations": {
-    "CAA": {
-      "model": "caa_v3_tq1.onnx",
-      "conf_thresh": 0.1
-    },
-    "EOL": {
-      "model": "eol_v3_oct14.onnx",
-      "conf_thresh": 0.1
-    },
-    "INSPECTION": {
-      "model": "eol_cob.onnx",
-      "conf_thresh": 0.1
+    "Packing": {
+      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/wel.pt",
+      "conf_thresh": 0.6
     }
+  },
+
+  "operator_status": {
+    "tracker": "bytetrack_custom.yaml",
+    "person_conf": 0.3,
+    "pose_conf": 0.5,
+    "keypoint_conf": 0.5,
+    "motion_window_seconds": 2.0,
+    "motion_threshold": 0.12,
+    "debounce_seconds": 5,
+    "away_seconds": 30,
+    "max_operators": 8,
+    "reid_seconds": 20,
+    "reid_distance": 1.0,
+    "towel_class": "Towel",
+    "towel_conf": 0.3,
+    "towel_reach": 0.6,
+    "towel_hold_seconds": 3
   },
 
   "lines": {
     "line_1": {
       "line_name": "Line 1",
-      "product_name": "K192323",
+      "product_name": "Towel",
 
       "shifts": [
         {
@@ -66,17 +86,17 @@
         "ST01": {
           "station_name": "Station 1",
           "camera": "cam1",
-          "operation": "CAA"
-        },
-        "ST02": {
-          "station_name": "Station 2",
-          "camera": "cam2",
-          "operation": "EOL"
-        },
-        "ST03": {
-          "station_name": "Station 3",
-          "camera": "cam3",
-          "operation": "INSPECTION"
+          "operation": "Packing",
+          "roi": [
+            [211, 524],
+            [1360, 294],
+            [1709, 429],
+            [1784, 689],
+            [1735, 872],
+            [1411, 758],
+            [622, 1073],
+            [297, 1069]
+          ]
         }
       }
     }

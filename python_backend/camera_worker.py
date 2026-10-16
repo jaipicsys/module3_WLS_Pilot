@@ -1,6 +1,21 @@
+import os
+import time
+
+# Use TCP for RTSP and give up on a dead connection after 5 seconds
+# (otherwise OpenCV can hang ~30s on an unreachable camera).
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|stimeout;5000000",
+)
+
 import cv2
 
+from config_utils import CONFIG
 from logics import FrameLogic
+from video_recorder import VideoRecorder
+
+RETRY_SECONDS = CONFIG.get("rtsp_retry_seconds", 3)
+RECORD_VIDEO = CONFIG.get("record_video", False)
 
 
 class CameraWorker:
@@ -21,72 +36,88 @@ class CameraWorker:
         # All processing logic lives in logics.py
         self.logic = FrameLogic(camera_id)
 
-    def run(self):
-        print(
-            f"[INFO] Camera processor initialized: "
-            f"{self.camera_id}"
+        # Recording needs the annotations drawn, even without a display.
+        self.recorder = None
+        if RECORD_VIDEO:
+            self.recorder = VideoRecorder(camera_id)
+            self.logic.draw = True
+
+    def _show(self, frame, window_name):
+        """Show a frame. Returns False if the user pressed 'q'."""
+        height, width = frame.shape[:2]
+
+        display_frame = cv2.resize(
+            frame,
+            (
+                max(1, int(width * self.display_scale)),
+                max(1, int(height * self.display_scale)),
+            ),
+            interpolation=cv2.INTER_AREA,
         )
+
+        cv2.imshow(window_name, display_frame)
+        return (cv2.waitKey(1) & 0xFF) != ord("q")
+
+    def run(self):
+        print(f"[INFO] Camera processor initialized: {self.camera_id}")
         print(f"[INFO] RTSP URL: {self.rtsp_url}")
         print(f"[INFO] Display enabled: {self.enable_display}")
         print(f"[INFO] Display scale: {self.display_scale}")
-
-        cap = cv2.VideoCapture(self.rtsp_url)
-
-        if not cap.isOpened():
-            print(
-                f"[ERROR] Could not open camera "
-                f"{self.camera_id}"
-            )
-            cap.release()
-            return
+        print(f"[INFO] Recording enabled: {RECORD_VIDEO}")
+        print(f"[INFO] Reconnect interval: {RETRY_SECONDS}s")
 
         window_name = f"Camera - {self.camera_id}"
+        stop = False
 
         try:
-            while True:
-                ret, frame = cap.read()
+            while not stop:
+                cap = cv2.VideoCapture(self.rtsp_url)
 
-                if not ret:
+                if not cap.isOpened():
+                    cap.release()
                     print(
-                        f"[WARNING] Failed to read frame "
-                        f"from {self.camera_id}"
+                        f"[WARNING] {self.camera_id} not connected. "
+                        f"Retrying in {RETRY_SECONDS}s..."
                     )
-                    break
+                    time.sleep(RETRY_SECONDS)
+                    continue
 
-                # Hand the frame to the logic layer.
-                output_frame = self.logic.process(frame)
+                print(f"[INFO] {self.camera_id} connected.")
 
-                if self.enable_display:
-                    height, width = output_frame.shape[:2]
+                try:
+                    while True:
+                        ret, frame = cap.read()
 
-                    new_width = max(
-                        1, int(width * self.display_scale)
-                    )
-                    new_height = max(
-                        1, int(height * self.display_scale)
-                    )
+                        if not ret:
+                            print(
+                                f"[WARNING] Lost stream from "
+                                f"{self.camera_id}. Reconnecting..."
+                            )
+                            break  # back to the outer loop and reconnect
 
-                    display_frame = cv2.resize(
-                        output_frame,
-                        (new_width, new_height),
-                        interpolation=cv2.INTER_AREA,
-                    )
+                        output_frame = self.logic.process(frame)
 
-                    cv2.imshow(window_name, display_frame)
+                        if self.recorder is not None:
+                            self.recorder.write(output_frame)
 
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+                        if self.enable_display:
+                            if not self._show(output_frame, window_name):
+                                stop = True
+                                break
+                finally:
+                    cap.release()
+
+                if not stop:
+                    time.sleep(RETRY_SECONDS)
 
         finally:
-            cap.release()
+            if self.recorder is not None:
+                self.recorder.close()
 
             if self.enable_display:
-                cv2.destroyWindow(window_name)
+                cv2.destroyAllWindows()
 
-            print(
-                f"[INFO] Camera processor stopped: "
-                f"{self.camera_id}"
-            )
+            print(f"[INFO] Camera processor stopped: {self.camera_id}")
 
             if self.on_done_callback:
                 self.on_done_callback(self.camera_id)

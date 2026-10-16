@@ -34,9 +34,7 @@ class CameraManager:
             )
 
     def on_camera_done(self, camera_id):
-        print(
-            f"[INFO] Camera {camera_id} processing completed."
-        )
+        print(f"[INFO] Camera {camera_id} processing completed.")
         self.restart_server()
 
     def restart_server(self):

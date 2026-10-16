@@ -28,15 +28,10 @@ def get_auth_db_connection():
 # ---------------- COMMON MIGRATION HELPER ----------------
 
 def add_missing_columns(conn, table_name, columns):
-    """
-    Add columns that do not exist in an existing table.
-    Existing records are preserved.
-    """
+    """Add columns that do not exist yet. Existing rows are preserved."""
     existing = {
         row["name"]
-        for row in conn.execute(
-            f'PRAGMA table_info("{table_name}")'
-        ).fetchall()
+        for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
     }
 
     for column_name, definition in columns.items():
@@ -104,6 +99,11 @@ def init_operator_status_table(conn):
     add_missing_columns(conn, "operator_status", {
         "plant": "TEXT DEFAULT 'Unit 1 Textile'"
     })
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_operator_status_station_time
+        ON operator_status (station_name, start_time)
+    """)
 
 
 # ---------------- UNIT COUNT ----------------

@@ -4,6 +4,7 @@ import os
 from flask import Flask
 from flask_cors import CORS
 
+import operator_db
 from camera_manager import CameraManager
 from db import init_all_databases
 from routes import api_bp
@@ -41,11 +42,14 @@ if __name__ == "__main__":
     # Initialize all required database tables.
     init_all_databases()
 
+    # Close rows left open by a previous crash or restart.
+    operator_db.close_stale_segments()
+
     # Start configured cameras in background threads.
     manager = CameraManager(
         CAMERA_CONFIG,
-        enable_display=CONFIG.get("enable_display", False),
-        display_scale=CONFIG.get("display_scale", 0.6),
+        enable_display=ENABLE_DISPLAY,
+        display_scale=DISPLAY_SCALE,
     )
     manager.start_all()
 
