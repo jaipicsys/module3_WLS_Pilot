@@ -36,9 +36,9 @@
     "towel_class": "Towel",
     "towel_conf": 0.3,
     "towel_margin": 0.05,
-    "active_hold_seconds": 1,
-    "debounce_seconds": 1,
-    "away_seconds": 5,
+    "active_hold_seconds": 5,
+    "debounce_seconds": 0,
+    "away_seconds": 10,
     "debug_draw": false,
     "ignore_classes": ["Inspection_Person"],
     "box_with_towel_class": "box_with_towel",
@@ -116,9 +116,9 @@
               [1563, 663]
             ],
             "line": [
-              [1456, 626],
-              [1275, 525],
-              [1440, 588]
+              [1332, 405],
+              [1510, 674],
+              [1453, 512]
             ]
           },
           "operators": {
@@ -184,14 +184,12 @@
             },
             "OP7": {
               "enabled": true,
-              "logic": "box_near",
-              "active_hold_seconds": 3,
+              "logic": "always_active",
               "roi": [
-                [1051, 354],
-                [1138, 764],
-                [1483, 625],
-                [1259, 273],
-                [1052, 351]
+                [1131, 374],
+                [1201, 749],
+                [1487, 649],
+                [1349, 310]
               ]
             }
           }

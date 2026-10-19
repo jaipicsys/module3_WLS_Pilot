@@ -107,6 +107,7 @@ class OperatorState:
         self.candidate_since = None
         self.last_seen = None
         self.last_touch = None
+        self.present_since = None
 
 
 class FrameLogic:
@@ -139,8 +140,8 @@ class FrameLogic:
                            cfg.get("near_box_classes", ["Closed_Box", "box_with_towel"])]
         self.near_conf = cfg.get("near_box_conf", 0.3)
         self.near_margin = cfg.get("near_box_margin", 0.3)
-        self.hold = cfg.get("active_hold_seconds", 1)
-        self.debounce = cfg.get("debounce_seconds", 1)
+        self.hold = cfg.get("active_hold_seconds", 3)
+        self.debounce = cfg.get("debounce_seconds", 0)
         self.away_seconds = cfg.get("away_seconds", 5)
         self.debug_draw = cfg.get("debug_draw", False)
         self.ignore_names = [n.lower() for n in cfg.get("ignore_classes", [])]
@@ -494,17 +495,31 @@ class FrameLogic:
             p = by_op.get(oid)
 
             if p is not None:
+                if st.present_since is None:
+                    st.present_since = now
+
                 st.last_seen = now
                 if p["working"]:
                     st.last_touch = now
 
                 active = st.last_touch is not None and now - st.last_touch <= o["hold"]
-                self._update_status(oid, st, ACTIVE if active else IDLE, now)
+                raw = ACTIVE if active else IDLE
 
-            elif (st.last_seen is not None
-                  and now - st.last_seen >= self.away_seconds
-                  and st.status is not None
-                  and st.status != AWAY):
+                # Just appeared or just returned: wait the hold time before IDLE
+                if (raw == IDLE
+                        and st.status in (None, AWAY)
+                        and now - st.present_since < o["hold"]):
+                    continue
+
+                self._update_status(oid, st, raw, now)
+                continue
+
+            st.present_since = None
+
+            if (st.last_seen is not None
+                    and now - st.last_seen >= self.away_seconds
+                    and st.status is not None
+                    and st.status != AWAY):
                 self._commit(oid, st, AWAY, st.last_seen)
 
     def _update_status(self, oid, st, raw, now):
