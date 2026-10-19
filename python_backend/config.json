@@ -24,23 +24,24 @@
 
   "operations": {
     "Packing": {
-      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_oct12.pt",
+      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_oct12_6.pt",
       "conf_thresh": 0.6
     }
   },
 
   "operator_status": {
     "tracker": "bytetrack_custom.yaml",
+    "monitor_ids": [1, 2, 3, 5],
     "person_conf": 0.3,
     "pose_conf": 0.5,
-    "keypoint_conf": 0.5,
-    "motion_window_seconds": 2.0,
-    "motion_threshold": 0.12,
-    "debounce_seconds": 5,
-    "away_seconds": 30,
-    "max_operators": 8,
-    "reid_seconds": 20,
-    "reid_distance": 1.0,
+    "wrist_conf": 0.3,
+    "towel_class": "Towel",
+    "towel_conf": 0.3,
+    "towel_margin": 0.05,
+    "idle_after_seconds": 3,
+    "debounce_seconds": 1,
+    "away_seconds": 5,
+    "forget_seconds": 120,
     "ignore_classes": ["Inspection_Person"]
   },
 
@@ -93,41 +94,7 @@
             [1411, 758],
             [622, 1073],
             [297, 1069]
-          ],
-          "seats": {
-            "OP1": {
-              "roi": [
-                [425, 500],
-                [578, 470],
-                [627, 692],
-                [465, 750]
-              ]
-            },
-            "OP2": {
-              "roi": [
-                [489, 678],
-                [668, 641],
-                [737, 1007],
-                [533, 1058]
-              ]
-            },
-            "OP3": {
-              "roi": [
-                [591, 452],
-                [838, 431],
-                [878, 650],
-                [689, 703]
-              ]
-            },
-            "OP4": {
-              "roi": [
-                [689, 665],
-                [985, 581],
-                [1098, 877],
-                [756, 937]
-              ]
-            }
-          }
+          ]
         }
       }
     }
