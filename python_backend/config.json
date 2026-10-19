@@ -104,24 +104,13 @@
             [297, 1069]
           ],
           "box_count": {
-            "trolley_class": "Trolly_Box",
+            "person_class": "Yellow_Person",
+            "person_conf": 0.4,
             "box_classes": ["Closed_Box"],
-            "trolley_conf": 0.4,
             "box_conf": 0.4,
-            "boxes_per_trolley": 12,
-            "trolley_absent_s": 5,
-            "cooldown_s": 5,
-            "zone": [
-              [1417, 564],
-              [1578, 437],
-              [1703, 563],
-              [1563, 663]
-            ],
-            "line": [
-              [1332, 405],
-              [1510, 674],
-              [1453, 512]
-            ]
+            "overlap_min": 0.1,
+            "overlap_frames": 5,
+            "release_s": 2
           },
           "operators": {
             "OP1": {
