@@ -1,4 +1,3 @@
-import os
 import re
 import time
 from datetime import datetime
@@ -12,7 +11,6 @@ import operator_db
 import unit_count_db
 from box_counter import BoxCounter
 from config_utils import (
-    BASE_DIR,
     CONFIG,
     find_station_for_camera,
     get_shift_and_break,
@@ -24,7 +22,7 @@ IDLE = "idle"
 AWAY = "away"
 
 REASON_NO_TOUCH = "Wrist not on towel"
-REASON_AWAY = "Left station area"
+REASON_AWAY = "Operator not in ROI"
 
 # COCO keypoints: left wrist, right wrist
 WRISTS = [9, 10]
@@ -41,10 +39,16 @@ OBJECT_COLORS = {
 
 COLOR_ACTIVE = (0, 200, 0)
 COLOR_IDLE = (0, 165, 255)
-COLOR_STATION = (255, 255, 0)
+COLOR_AWAY = (60, 60, 255)
+COLOR_SEAT = (0, 255, 255)
 COLOR_TABLE = (255, 0, 255)
 COLOR_PENDING = (200, 200, 200)
-COLOR_IGNORED = (130, 130, 130)
+COLOR_DEBUG = (255, 255, 255)
+
+# Logic name (config "logic") -> method name. Add new logics here.
+LOGICS = {
+    "wrist_on_towel": "_logic_wrist_on_towel",
+}
 
 
 def _cam_number(camera_id):
@@ -62,29 +66,23 @@ def _inside(poly, point):
     ) >= 0
 
 
-class OperatorStatus:
-    """Debounced (state, reason) and open DB row for ONE tracked person."""
-
-    def __init__(self, now):
-        self.key = None
+class OperatorState:
+    def __init__(self):
+        self.status = None          # committed status
         self.since = None
+        self.segment_id = None
         self.candidate = None
         self.candidate_since = None
-        self.segment_id = None
-        self.first_seen = now
-        self.last_seen = now
-        self.last_touch = None
-
-    @property
-    def status(self):
-        return self.key[0] if self.key else None
+        self.last_seen = None       # last time a person was in the ROI
+        self.last_touch = None      # last time a wrist was on a towel
 
 
 class FrameLogic:
     """
-    1. Operators: ByteTrack ids in monitor_ids are checked.
-         wrist on towel -> ACTIVE, none for 3 s -> IDLE, left ROI -> AWAY
-    2. Boxes: closed boxes that leave the table ROI are counted into unit_count.
+    One ROI per operator.
+      person in ROI + wrist on towel  -> ACTIVE
+      person in ROI, no wrist on towel -> IDLE
+      nobody in ROI for away_seconds   -> AWAY
     """
 
     def __init__(self, camera_id):
@@ -95,31 +93,42 @@ class FrameLogic:
             raise ValueError(f"No station configured for camera '{camera_id}'")
         self.line_id, self.line, self.station_id, self.station = found
 
-        if not self.station.get("roi"):
-            raise ValueError(f"Station {self.station_id} has no 'roi' in config.json")
-        self.station_roi = _poly(self.station["roi"])
-
         cfg = CONFIG.get("operator_status", {})
-
-        tracker = cfg.get("tracker", "bytetrack.yaml")
-        local_tracker = os.path.join(BASE_DIR, tracker)
-        self.tracker = local_tracker if os.path.exists(local_tracker) else tracker
-
-        self.monitor_ids = set(cfg.get("monitor_ids", []))   # empty = everyone
         self.person_conf = cfg.get("person_conf", 0.3)
         self.pose_conf = cfg.get("pose_conf", 0.5)
         self.wrist_conf = cfg.get("wrist_conf", 0.3)
         self.towel_name = cfg.get("towel_class", "Towel").lower()
         self.towel_conf = cfg.get("towel_conf", 0.3)
         self.towel_margin = cfg.get("towel_margin", 0.05)
-        self.idle_after = cfg.get("idle_after_seconds", 3)
+        self.hold = cfg.get("active_hold_seconds", 1)
         self.debounce = cfg.get("debounce_seconds", 1)
-        self.away_seconds = cfg.get("away_seconds", 5)
-        self.forget_seconds = cfg.get("forget_seconds", 120)
+        self.away_seconds = cfg.get("away_seconds", 3)
+        self.debug_draw = cfg.get("debug_draw", False)
         self.ignore_names = [n.lower() for n in cfg.get("ignore_classes", [])]
         self.draw = CONFIG.get("enable_display", False)
 
-        # ---- box counting settings ----
+        # ---- operators ----
+        self.ops = {}
+        for oid, o in self.station.get("operators", {}).items():
+            if not o.get("enabled", True):
+                continue
+            if len(o.get("roi") or []) < 3:
+                print(f"[WARNING] {camera_id}: {oid} has no ROI, skipped")
+                continue
+            logic = o.get("logic", "wrist_on_towel")
+            if logic not in LOGICS:
+                raise ValueError(f"{oid}: unknown logic '{logic}'. Available: {list(LOGICS)}")
+            self.ops[oid] = {
+                "roi": _poly(o["roi"]),
+                "centre": np.array(o["roi"], dtype=float).mean(axis=0),
+                "logic": getattr(self, LOGICS[logic]),
+                "wrist_conf": o.get("wrist_conf", self.wrist_conf),
+                "towel_margin": o.get("towel_margin", self.towel_margin),
+            }
+        if not self.ops:
+            raise ValueError(f"Station {self.station_id}: no enabled operators")
+
+        # ---- box counting ----
         bc = self.station.get("box_count")
         if not bc or len(bc.get("roi") or []) < 3:
             raise ValueError(f"Station {self.station_id} needs 'box_count' with an 'roi'")
@@ -128,19 +137,15 @@ class FrameLogic:
         self.box_conf = bc.get("conf", 0.5)
         self.counter = BoxCounter(leave_seconds=bc.get("leave_seconds", 3))
 
+        # ---- device ----
         device = CONFIG.get("device", "auto")
         if device == "auto":
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.half = self.device != "cpu"
+        print(f"[INFO] {camera_id}: running on {self.device}")
 
-        if self.device == "cpu":
-            print(f"[WARNING] {camera_id}: running on CPU (slow). "
-                  f"CUDA available: {torch.cuda.is_available()}")
-        else:
-            print(f"[INFO] {camera_id}: running on {self.device} "
-                  f"({torch.cuda.get_device_name(0)})")
-
+        # ---- models ----
         op_cfg = CONFIG["operations"][self.station["operation"]]
         self.det_conf = op_cfg.get("conf_thresh", 0.6)
         self.detect_conf = min(
@@ -151,35 +156,27 @@ class FrameLogic:
         self.pose_model = YOLO(resolve_model_path(CONFIG["pose_model"]))
 
         self.names = self.det_model.names
-        lower_names = {i: n.lower() for i, n in self.names.items()}
+        lower = {i: n.lower() for i, n in self.names.items()}
 
-        person_ids = [i for i, n in lower_names.items() if n == "person"]
+        person_ids = [i for i, n in lower.items() if n == "person"]
         if not person_ids:
             raise ValueError(f"'Person' class not found in model: {self.names}")
         self.person_class = person_ids[0]
 
-        if self.towel_name not in lower_names.values():
-            raise ValueError(
-                f"Towel class '{self.towel_name}' not found in model: {self.names}"
-            )
+        for what, names in (("Towel", [self.towel_name]),
+                            ("box_count classes", self.count_names),
+                            ("ignore_classes", self.ignore_names)):
+            bad = [n for n in names if n not in lower.values()]
+            if bad:
+                raise ValueError(f"{what} {bad} not in model: {self.names}")
 
-        missing = [n for n in self.count_names if n not in lower_names.values()]
-        if missing:
-            raise ValueError(f"box_count classes {missing} not in model: {self.names}")
-
-        unknown = [n for n in self.ignore_names if n not in lower_names.values()]
-        if unknown:
-            raise ValueError(
-                f"ignore_classes {unknown} not found in model: {self.names}"
-            )
-        ignore_ids = {i for i, n in lower_names.items() if n in self.ignore_names}
+        ignore_ids = {i for i, n in lower.items() if n in self.ignore_names}
         self.detect_classes = [i for i in self.names if i not in ignore_ids]
 
-        print(f"[INFO] {camera_id}: monitoring ids "
-              f"{sorted(self.monitor_ids) if self.monitor_ids else 'ALL'}, "
-              f"counting {self.count_names}")
+        print(f"[INFO] {camera_id}: operators {list(self.ops)}")
 
-        self.operators = {}     # track id -> OperatorStatus
+        self.state = {oid: OperatorState() for oid in self.ops}
+        self.raw = []
 
     # ---------------- main entry ----------------
 
@@ -187,7 +184,10 @@ class FrameLogic:
         now = time.time()
         persons, towels, objects, boxes = self._detect(frame)
 
-        self._check_wrists(persons, towels)
+        for p in persons:
+            o = self.ops[p["op"]]
+            o["logic"](p, towels, o)            # sets p["working"]
+
         self._update_operators(persons, now)
         self._count_boxes(boxes, now)
 
@@ -198,19 +198,9 @@ class FrameLogic:
 
     # ---------------- detection ----------------
 
-    @staticmethod
-    def _anchor(box):
-        x1, y1, x2, y2 = box
-        return (float((x1 + x2) / 2), float(y2))
-
-    def _monitored(self, tid):
-        return not self.monitor_ids or tid in self.monitor_ids
-
     def _detect(self, frame):
-        result = self.det_model.track(
+        result = self.det_model.predict(
             frame,
-            persist=True,
-            tracker=self.tracker,
             conf=self.detect_conf,
             classes=self.detect_classes,
             device=self.device,
@@ -218,38 +208,26 @@ class FrameLogic:
             verbose=False,
         )[0]
 
-        persons, towels, objects, boxes_out = [], [], [], []
+        people, towels, objects, boxes_out = [], [], [], []
+        self.raw = []
 
         boxes = result.boxes
         if boxes is not None and len(boxes) > 0:
             xyxy = boxes.xyxy.cpu().numpy()
             classes = boxes.cls.int().cpu().tolist()
             confs = boxes.conf.cpu().numpy()
-            ids = (
-                boxes.id.int().cpu().tolist()
-                if boxes.id is not None
-                else [None] * len(classes)
-            )
 
-            for box, cls, conf, tid in zip(xyxy, classes, confs, ids):
+            for box, cls, conf in zip(xyxy, classes, confs):
                 name = self.names[cls]
                 lname = name.lower()
+                self.raw.append((name, float(conf), box))
 
                 if cls == self.person_class:
-                    if tid is None or conf < self.person_conf:
-                        continue
-                    if not _inside(self.station_roi, self._anchor(box)):
-                        continue
-                    persons.append({
-                        "id": tid, "box": box,
-                        "monitored": self._monitored(tid),
-                        "kxy": None, "kconf": None, "touching": False,
-                    })
+                    if conf >= self.person_conf:
+                        people.append({"box": box})
                 elif lname == self.towel_name:
                     if conf >= self.towel_conf:
-                        towels.append({
-                            "box": box, "conf": float(conf), "touched": False,
-                        })
+                        towels.append({"box": box, "conf": float(conf), "touched": False})
                 elif lname in self.count_names:
                     if conf >= self.box_conf:
                         cx = (box[0] + box[2]) / 2
@@ -261,12 +239,38 @@ class FrameLogic:
                 elif conf >= self.det_conf:
                     objects.append({"name": name, "conf": float(conf), "box": box})
 
-        # Pose only for monitored people
+        persons = self._assign_operators(people)
+
         for p in persons:
-            if p["monitored"]:
-                p["kxy"], p["kconf"] = self._pose_on_crop(frame, p["box"])
+            p["kxy"], p["kconf"] = self._pose_on_crop(frame, p["box"])
 
         return persons, towels, objects, boxes_out
+
+    def _assign_operators(self, people):
+        """A person is in an ROI if their centre or feet are inside it.
+        One person per operator (nearest to the ROI centre)."""
+        pairs = []
+        for i, p in enumerate(people):
+            x1, y1, x2, y2 = p["box"]
+            centre = ((x1 + x2) / 2, (y1 + y2) / 2)
+            feet = ((x1 + x2) / 2, y2)
+            for oid, o in self.ops.items():
+                if _inside(o["roi"], centre) or _inside(o["roi"], feet):
+                    sx, sy = o["centre"]
+                    pairs.append((np.hypot(centre[0] - sx, centre[1] - sy), i, oid))
+
+        pairs.sort()
+        used_p, used_o, out = set(), set(), []
+        for _, i, oid in pairs:
+            if i in used_p or oid in used_o:
+                continue
+            used_p.add(i)
+            used_o.add(oid)
+            out.append({
+                "box": people[i]["box"], "op": oid, "working": False,
+                "kxy": None, "kconf": None,
+            })
+        return out
 
     def _pose_on_crop(self, frame, box):
         """Pose of ONE person; with overlap, take the pose nearest to this box."""
@@ -281,18 +285,14 @@ class FrameLogic:
             return None, None
 
         res = self.pose_model.predict(
-            crop,
-            conf=self.pose_conf,
-            device=self.device,
-            half=self.half,
-            verbose=False,
+            crop, conf=self.pose_conf, device=self.device,
+            half=self.half, verbose=False,
         )[0]
 
         if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
             return None, None
 
-        ox = (x1 + x2) / 2 - cx1
-        oy = (y1 + y2) / 2 - cy1
+        ox, oy = (x1 + x2) / 2 - cx1, (y1 + y2) / 2 - cy1
         pb = res.boxes.xyxy.cpu().numpy()
         centres = np.stack(
             [(pb[:, 0] + pb[:, 2]) / 2, (pb[:, 1] + pb[:, 3]) / 2], axis=1
@@ -307,12 +307,33 @@ class FrameLogic:
         )
         return xy, conf
 
+    # ---------------- operator logics ----------------
+    # Each logic gets (person, towels, operator settings) and sets
+    # person["working"] = True / False.
+
+    def _logic_wrist_on_towel(self, p, towels, o):
+        p["working"] = False
+        if p["kxy"] is None:
+            return
+
+        margin = (p["box"][3] - p["box"][1]) * o["towel_margin"]
+
+        for k in WRISTS:
+            if p["kconf"][k] <= o["wrist_conf"]:
+                continue
+            wx, wy = p["kxy"][k]
+            for t in towels:
+                tx1, ty1, tx2, ty2 = t["box"]
+                if (tx1 - margin <= wx <= tx2 + margin
+                        and ty1 - margin <= wy <= ty2 + margin):
+                    p["working"] = True
+                    t["touched"] = True
+
     # ---------------- box counting ----------------
 
     def _count_boxes(self, boxes, now):
         present = sum(1 for b in boxes if b["on_table"])
         n = self.counter.update(present, now)
-
         if n <= 0:
             return
 
@@ -328,7 +349,6 @@ class FrameLogic:
             "cam_id": _cam_number(self.camera_id),
             "plant": CONFIG.get("plant"),
         }
-
         try:
             unit_count_db.add_count(info, n, now_dt)
             print(f"[COUNT] {self.camera_id}: +{n} box(es), "
@@ -336,133 +356,74 @@ class FrameLogic:
         except Exception as e:
             print(f"[ERROR] unit_count write failed: {e}")
 
-    # ---------------- wrist on towel ----------------
-
-    def _check_wrists(self, persons, towels):
-        for p in persons:
-            if not p["monitored"] or p["kxy"] is None:
-                continue
-
-            margin = (p["box"][3] - p["box"][1]) * self.towel_margin
-
-            for k in WRISTS:
-                if p["kconf"][k] <= self.wrist_conf:
-                    continue
-                wx, wy = p["kxy"][k]
-
-                for t in towels:
-                    tx1, ty1, tx2, ty2 = t["box"]
-                    if (tx1 - margin <= wx <= tx2 + margin
-                            and ty1 - margin <= wy <= ty2 + margin):
-                        p["touching"] = True
-                        t["touched"] = True
-
     # ---------------- active / idle / away ----------------
 
-    def _decide(self, op, now):
-        if op.last_touch is not None and now - op.last_touch <= self.idle_after:
-            return ACTIVE, None
-        ref = op.last_touch if op.last_touch is not None else op.first_seen
-        if now - ref >= self.idle_after:
-            return IDLE, REASON_NO_TOUCH
-        return None
-
     def _update_operators(self, persons, now):
-        present = set()
+        by_op = {p["op"]: p for p in persons}
 
-        for p in persons:
-            if not p["monitored"]:
-                continue
+        for oid in self.ops:
+            st = self.state[oid]
+            p = by_op.get(oid)
 
-            tid = p["id"]
-            present.add(tid)
+            if p is not None:
+                st.last_seen = now
+                if p["working"]:
+                    st.last_touch = now
 
-            op = self.operators.get(tid)
-            if op is None:
-                op = self.operators[tid] = OperatorStatus(now)
-            elif op.status == AWAY or now - op.last_seen > self.away_seconds:
-                op.first_seen = now
-                op.last_touch = None
+                active = st.last_touch is not None and now - st.last_touch <= self.hold
+                self._update_status(oid, st, ACTIVE if active else IDLE, now)
 
-            op.last_seen = now
-            if p["touching"]:
-                op.last_touch = now
+            elif (st.last_seen is not None
+                  and now - st.last_seen >= self.away_seconds
+                  and st.status is not None
+                  and st.status != AWAY):
+                # nobody for away_seconds: AWAY, backdated to last seen
+                self._commit(oid, st, AWAY, st.last_seen)
 
-            key = self._decide(op, now)
-            if key is not None:
-                self._update_person(tid, op, key, now)
-
-        for tid in list(self.operators):
-            if tid in present:
-                continue
-
-            op = self.operators[tid]
-            gap = now - op.last_seen
-
-            if gap >= self.away_seconds and op.key is not None and op.status != AWAY:
-                self._commit_person(tid, op, (AWAY, REASON_AWAY), op.last_seen)
-
-            if gap >= self.forget_seconds or (gap >= self.away_seconds and op.key is None):
-                self._close_person(tid, op, now)
-                del self.operators[tid]
-
-    def _update_person(self, tid, op, key, now):
-        if op.key is None:
-            self._commit_person(tid, op, key, now)
+    def _update_status(self, oid, st, raw, now):
+        if st.status is None:
+            self._commit(oid, st, raw, now)
             return
 
-        if key == op.key:
-            op.candidate = None
+        if raw == st.status:
+            st.candidate = None
             return
 
-        if key != op.candidate:
-            op.candidate = key
-            op.candidate_since = now
+        if raw != st.candidate:
+            st.candidate = raw
+            st.candidate_since = now
             return
 
-        if now - op.candidate_since >= self.debounce:
-            self._commit_person(tid, op, key, op.candidate_since)
+        if now - st.candidate_since >= self.debounce:
+            self._commit(oid, st, raw, st.candidate_since)
 
-    def _commit_person(self, tid, op, key, start_ts):
-        state, reason = key
-        if op.since is not None:
-            start_ts = max(start_ts, op.since)
-        print(f"[STATUS] {self.camera_id} P{tid}: {op.key} -> {key}")
+    def _commit(self, oid, st, state, start_ts):
+        if st.since is not None:
+            start_ts = max(start_ts, st.since)
+        print(f"[STATUS] {self.camera_id} {oid}: {st.status} -> {state}")
 
+        reason = (REASON_AWAY if state == AWAY
+                  else REASON_NO_TOUCH if state == IDLE else None)
         try:
-            if op.segment_id is not None:
+            if st.segment_id is not None:
                 operator_db.close_segment(
-                    op.segment_id,
-                    self._iso(start_ts),
-                    start_ts - op.since,
+                    st.segment_id, self._iso(start_ts), start_ts - st.since
                 )
-
-            op.segment_id = operator_db.open_segment(
-                self._build_row(state, reason, datetime.fromtimestamp(start_ts), tid)
+            st.segment_id = operator_db.open_segment(
+                self._build_row(state, reason, datetime.fromtimestamp(start_ts), oid)
             )
         except Exception as e:
             print(f"[ERROR] operator_status write failed: {e}")
 
-        op.key = key
-        op.since = start_ts
-        op.candidate = None
-
-    def _close_person(self, tid, op, end_ts):
-        if op.segment_id is None:
-            return
-        try:
-            operator_db.close_segment(
-                op.segment_id, self._iso(end_ts), end_ts - op.since
-            )
-            print(f"[STATUS] {self.camera_id} P{tid}: closed")
-        except Exception as e:
-            print(f"[ERROR] operator_status close failed: {e}")
+        st.status = state
+        st.since = start_ts
+        st.candidate = None
 
     @staticmethod
     def _iso(ts):
         return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
 
-    def _build_row(self, state, reason, start_dt, tid):
+    def _build_row(self, state, reason, start_dt, oid):
         shift, brk = get_shift_and_break(self.line, start_dt)
         return {
             "line_id": self.line_id,
@@ -477,22 +438,42 @@ class FrameLogic:
             "start_time": self._iso(start_dt.timestamp()),
             "status": state,
             "reasons": reason,
-            "operator_id": f"P{tid}",
+            "operator_id": oid,
             "plant": CONFIG.get("plant"),
         }
 
     # ---------------- drawing ----------------
 
     def _draw(self, frame, persons, towels, objects, boxes):
-        cv2.polylines(frame, [self.station_roi], True, COLOR_STATION, 4)
         cv2.polylines(frame, [self.table_roi], True, COLOR_TABLE, 4)
 
-        for o in objects:
-            x1, y1, x2, y2 = map(int, o["box"])
-            color = OBJECT_COLORS.get(o["name"].lower(), (200, 200, 0))
+        if self.debug_draw:
+            for name, conf, box in self.raw:
+                x1, y1, x2, y2 = map(int, box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_DEBUG, 1)
+                cv2.putText(frame, f"{name} {conf:.2f}",
+                            (x1, min(frame.shape[0] - 5, y2 + 22)),
+                            FONT, 0.7, COLOR_DEBUG, 2)
+
+        # Operator ROIs with their status
+        occupied = {p["op"] for p in persons}
+        for oid, o in self.ops.items():
+            cv2.polylines(frame, [o["roi"]], True, COLOR_SEAT, 3)
+            cx, cy = o["centre"]
+            st = self.state[oid]
+            if oid in occupied:
+                tag, color = oid, COLOR_SEAT
+            elif st.status == AWAY:
+                tag, color = f"{oid} AWAY", COLOR_AWAY
+            else:
+                tag, color = f"{oid} (empty)", COLOR_SEAT
+            cv2.putText(frame, tag, (int(cx) - 50, int(cy)), FONT, 1.0, color, 2)
+
+        for ob in objects:
+            x1, y1, x2, y2 = map(int, ob["box"])
+            color = OBJECT_COLORS.get(ob["name"].lower(), (200, 200, 0))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # Counted-class boxes: thick when on the table
         for b in boxes:
             x1, y1, x2, y2 = map(int, b["box"])
             color = OBJECT_COLORS.get(b["name"].lower(), (0, 165, 255))
@@ -506,25 +487,18 @@ class FrameLogic:
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 5 if t["touched"] else 2)
 
         for p in persons:
-            tid = p["id"]
             x1, y1, x2, y2 = map(int, p["box"])
+            oid = p["op"]
+            st = self.state[oid]
 
-            if not p["monitored"]:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_IGNORED, 2)
-                cv2.putText(frame, f"ID {tid}", (x1, max(30, y1 - 10)),
-                            FONT, 1.0, COLOR_IGNORED, 2)
-                continue
-
-            op = self.operators.get(tid)
-            if op is not None and op.status == ACTIVE:
-                color, label = COLOR_ACTIVE, f"P{tid}  ACTIVE"
-            elif op is not None and op.status == IDLE:
-                color, label = COLOR_IDLE, f"P{tid}  IDLE"
+            if st.status == ACTIVE:
+                color, label = COLOR_ACTIVE, f"{oid}  ACTIVE"
+            elif st.status == IDLE:
+                color, label = COLOR_IDLE, f"{oid}  IDLE"
             else:
-                color, label = COLOR_PENDING, f"P{tid}  ..."
+                color, label = COLOR_PENDING, f"{oid}  ..."
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 5)
-
             (tw, th), _ = cv2.getTextSize(label, FONT, 1.4, 3)
             top = max(0, y1 - th - 24)
             cv2.rectangle(frame, (x1, top), (x1 + tw + 20, top + th + 24), color, -1)
@@ -532,21 +506,13 @@ class FrameLogic:
                         FONT, 1.4, (0, 0, 0), 3)
 
             if p["kxy"] is not None:
-                dot = COLOR_ACTIVE if p["touching"] else (0, 0, 255)
+                dot = COLOR_ACTIVE if p["working"] else (0, 0, 255)
+                wc = self.ops[oid]["wrist_conf"]
                 for k in WRISTS:
-                    if p["kconf"][k] > self.wrist_conf:
+                    if p["kconf"][k] > wc:
                         x, y = p["kxy"][k]
                         cv2.circle(frame, (int(x), int(y)), 10, dot, -1)
 
-        # Away list (top-left)
-        y = 60
-        for tid, op in self.operators.items():
-            if op.status == AWAY:
-                cv2.putText(frame, f"P{tid} AWAY", (30, y),
-                            FONT, 1.4, (60, 60, 255), 3)
-                y += 50
-
-        # Box counter (bottom-left)
         h = frame.shape[0]
         cv2.putText(
             frame,

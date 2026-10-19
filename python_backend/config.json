@@ -1,6 +1,6 @@
 {
   "host": "0.0.0.0",
-  "flask_port": 5001,
+  "flask_port": 5002,
   "enable_display": false,
   "display_scale": 0.4,
   "device": "auto",
@@ -30,18 +30,16 @@
   },
 
   "operator_status": {
-    "tracker": "bytetrack_custom.yaml",
-    "monitor_ids": [1, 2, 3, 5],
     "person_conf": 0.3,
     "pose_conf": 0.5,
     "wrist_conf": 0.3,
     "towel_class": "Towel",
     "towel_conf": 0.3,
     "towel_margin": 0.05,
-    "idle_after_seconds": 3,
+    "active_hold_seconds": 1,
     "debounce_seconds": 1,
-    "away_seconds": 5,
-    "forget_seconds": 120,
+    "away_seconds": 3,
+    "debug_draw": false,
     "ignore_classes": ["Inspection_Person"]
   },
 
@@ -96,10 +94,78 @@
             [297, 1069]
           ],
           "box_count": {
-            "roi": [[465, 722], [1289, 508], [1449, 621], [521, 906]],
+            "roi": [
+              [465, 722],
+              [1289, 508],
+              [1449, 621],
+              [521, 906]
+            ],
             "classes": ["Closed_Box"],
             "conf": 0.5,
             "leave_seconds": 3
+          },
+          "operators": {
+            "OP1": {
+              "enabled": true,
+              "logic": "wrist_on_towel",
+              "roi": [
+                [413, 484],
+                [568, 468],
+                [609, 684],
+                [443, 742]
+              ]
+            },
+            "OP2": {
+              "enabled": true,
+              "logic": "wrist_on_towel",
+              "roi": [
+                [466, 665],
+                [685, 643],
+                [745, 1036],
+                [541, 1069]
+              ]
+            },
+            "OP3": {
+              "enabled": true,
+              "logic": "wrist_on_towel",
+              "roi": [
+                [737, 649],
+                [880, 633],
+                [927, 910],
+                [759, 942]
+              ]
+            },
+            "OP4": {
+              "enabled": true,
+              "logic": "wrist_on_towel",
+              "roi": [
+                [593, 453],
+                [783, 436],
+                [806, 636],
+                [642, 670]
+              ]
+            },
+            "OP5": {
+              "enabled": false,
+              "logic": "wrist_on_towel",
+              "roi": [
+                [876, 408],
+                [1082, 391],
+                [1117, 622],
+                [909, 633]
+              ]
+            },
+            "OP6": {
+              "enabled": false,
+              "logic": "wrist_on_towel",
+              "roi": [
+                [1526, 611],
+                [1722, 612],
+                [1739, 818],
+                [1493, 834]
+              ]
+            },
+            "OP7": { "enabled": false, "logic": "wrist_on_towel", "roi": [] }
           }
         }
       }
