@@ -45,7 +45,10 @@
     "box_with_towel_conf": 0.3,
     "box_overlap_min": 0.05,
     "pose_min_keypoints": 6,
-    "pose_kp_conf": 0.4
+    "pose_kp_conf": 0.4,
+    "near_box_classes": ["Closed_Box", "box_with_towel"],
+    "near_box_conf": 0.3,
+    "near_box_margin": 0.3
   },
 
   "lines": {
@@ -154,10 +157,10 @@
               "enabled": true,
               "logic": "box_with_towel_overlap",
               "roi": [
-                [928, 398],
-                [990, 623],
-                [1177, 576],
-                [1082, 346]
+                [861, 428],
+                [1167, 354],
+                [1166, 562],
+                [904, 620]
               ]
             },
             "OP6": {
@@ -171,8 +174,9 @@
               ]
             },
             "OP7": {
-              "enabled": false,
-              "logic": "wrist_on_towel",
+              "enabled": true,
+              "logic": "box_near",
+              "active_hold_seconds": 3,
               "roi": [
                 [1131, 374],
                 [1201, 749],
