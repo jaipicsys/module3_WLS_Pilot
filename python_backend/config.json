@@ -38,9 +38,14 @@
     "towel_margin": 0.05,
     "active_hold_seconds": 1,
     "debounce_seconds": 1,
-    "away_seconds": 3,
+    "away_seconds": 5,
     "debug_draw": false,
-    "ignore_classes": ["Inspection_Person"]
+    "ignore_classes": ["Inspection_Person"],
+    "box_with_towel_class": "box_with_towel",
+    "box_with_towel_conf": 0.3,
+    "box_overlap_min": 0.05,
+    "pose_min_keypoints": 6,
+    "pose_kp_conf": 0.4
   },
 
   "lines": {
@@ -109,63 +114,72 @@
               "enabled": true,
               "logic": "wrist_on_towel",
               "roi": [
-                [413, 484],
-                [568, 468],
-                [609, 684],
-                [443, 742]
+                [444, 484],
+                [470, 746],
+                [664, 682],
+                [586, 453]
               ]
             },
             "OP2": {
               "enabled": true,
               "logic": "wrist_on_towel",
               "roi": [
-                [466, 665],
-                [685, 643],
-                [745, 1036],
-                [541, 1069]
+                [476, 716],
+                [540, 1059],
+                [775, 1004],
+                [661, 623]
               ]
             },
             "OP3": {
               "enabled": true,
               "logic": "wrist_on_towel",
               "roi": [
-                [737, 649],
-                [880, 633],
-                [927, 910],
-                [759, 942]
+                [745, 645],
+                [819, 979],
+                [1168, 885],
+                [1041, 557]
               ]
             },
             "OP4": {
               "enabled": true,
               "logic": "wrist_on_towel",
               "roi": [
-                [593, 453],
-                [783, 436],
-                [806, 636],
-                [642, 670]
+                [608, 429],
+                [687, 664],
+                [917, 576],
+                [753, 354]
               ]
             },
             "OP5": {
-              "enabled": false,
-              "logic": "wrist_on_towel",
+              "enabled": true,
+              "logic": "box_with_towel_overlap",
               "roi": [
-                [876, 408],
-                [1082, 391],
-                [1117, 622],
-                [909, 633]
+                [928, 398],
+                [990, 623],
+                [1177, 576],
+                [1082, 346]
               ]
             },
             "OP6": {
+              "enabled": true,
+              "logic": "always_active",
+              "roi": [
+                [1504, 623],
+                [1576, 896],
+                [1860, 800],
+                [1705, 535]
+              ]
+            },
+            "OP7": {
               "enabled": false,
               "logic": "wrist_on_towel",
               "roi": [
-                [1526, 611],
-                [1722, 612],
-                [1739, 818],
-                [1493, 834]
+                [1131, 374],
+                [1201, 749],
+                [1487, 649],
+                [1349, 310]
               ]
-            },
-            "OP7": { "enabled": false, "logic": "wrist_on_towel", "roi": [] }
+            }
           }
         }
       }

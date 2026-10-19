@@ -21,7 +21,6 @@ ACTIVE = "active_work"
 IDLE = "idle"
 AWAY = "away"
 
-REASON_NO_TOUCH = "Wrist not on towel"
 REASON_AWAY = "Operator not in ROI"
 
 # COCO keypoints: left wrist, right wrist
@@ -44,10 +43,28 @@ COLOR_SEAT = (0, 255, 255)
 COLOR_TABLE = (255, 0, 255)
 COLOR_PENDING = (200, 200, 200)
 COLOR_DEBUG = (255, 255, 255)
+COLOR_NO_POSE = (130, 130, 130)
 
-# Logic name (config "logic") -> method name. Add new logics here.
+# Logic name (config "logic") -> settings.
+#   method      : FrameLogic method that sets p["working"]
+#   needs_pose  : run the pose model for this operator
+#   idle_reason : text written to "reasons" when the operator is IDLE
 LOGICS = {
-    "wrist_on_towel": "_logic_wrist_on_towel",
+    "wrist_on_towel": {
+        "method": "_logic_wrist_on_towel",
+        "needs_pose": True,
+        "idle_reason": "No towel or pose not detected",
+    },
+    "box_with_towel_overlap": {
+        "method": "_logic_box_with_towel_overlap",
+        "needs_pose": False,
+        "idle_reason": "No box with towel",
+    },
+    "always_active": {
+        "method": "_logic_always_active",
+        "needs_pose": False,
+        "idle_reason": None,
+    },
 }
 
 
@@ -66,6 +83,17 @@ def _inside(poly, point):
     ) >= 0
 
 
+def _overlap_ratio(person_box, obj_box):
+    """Share of obj_box that lies inside person_box (0..1)."""
+    ix1 = max(person_box[0], obj_box[0])
+    iy1 = max(person_box[1], obj_box[1])
+    ix2 = min(person_box[2], obj_box[2])
+    iy2 = min(person_box[3], obj_box[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    area = max(1.0, (obj_box[2] - obj_box[0]) * (obj_box[3] - obj_box[1]))
+    return inter / area
+
+
 class OperatorState:
     def __init__(self):
         self.status = None          # committed status
@@ -74,15 +102,15 @@ class OperatorState:
         self.candidate = None
         self.candidate_since = None
         self.last_seen = None       # last time a person was in the ROI
-        self.last_touch = None      # last time a wrist was on a towel
+        self.last_touch = None      # last time the logic said "working"
 
 
 class FrameLogic:
     """
-    One ROI per operator.
-      person in ROI + wrist on towel  -> ACTIVE
-      person in ROI, no wrist on towel -> IDLE
-      nobody in ROI for away_seconds   -> AWAY
+    One ROI per operator, each with its own logic.
+      person in ROI + logic says working -> ACTIVE
+      person in ROI, not working         -> IDLE
+      nobody in ROI for away_seconds     -> AWAY
     """
 
     def __init__(self, camera_id):
@@ -97,12 +125,17 @@ class FrameLogic:
         self.person_conf = cfg.get("person_conf", 0.3)
         self.pose_conf = cfg.get("pose_conf", 0.5)
         self.wrist_conf = cfg.get("wrist_conf", 0.3)
+        self.pose_min_kp = cfg.get("pose_min_keypoints", 6)
+        self.pose_kp_conf = cfg.get("pose_kp_conf", 0.4)
         self.towel_name = cfg.get("towel_class", "Towel").lower()
         self.towel_conf = cfg.get("towel_conf", 0.3)
         self.towel_margin = cfg.get("towel_margin", 0.05)
+        self.bwt_name = cfg.get("box_with_towel_class", "box_with_towel").lower()
+        self.bwt_conf = cfg.get("box_with_towel_conf", 0.3)
+        self.overlap_min = cfg.get("box_overlap_min", 0.05)
         self.hold = cfg.get("active_hold_seconds", 1)
         self.debounce = cfg.get("debounce_seconds", 1)
-        self.away_seconds = cfg.get("away_seconds", 3)
+        self.away_seconds = cfg.get("away_seconds", 5)
         self.debug_draw = cfg.get("debug_draw", False)
         self.ignore_names = [n.lower() for n in cfg.get("ignore_classes", [])]
         self.draw = CONFIG.get("enable_display", False)
@@ -118,12 +151,18 @@ class FrameLogic:
             logic = o.get("logic", "wrist_on_towel")
             if logic not in LOGICS:
                 raise ValueError(f"{oid}: unknown logic '{logic}'. Available: {list(LOGICS)}")
+            spec = LOGICS[logic]
             self.ops[oid] = {
                 "roi": _poly(o["roi"]),
                 "centre": np.array(o["roi"], dtype=float).mean(axis=0),
-                "logic": getattr(self, LOGICS[logic]),
+                "logic": getattr(self, spec["method"]),
+                "logic_name": logic,
+                "needs_pose": spec["needs_pose"],
+                "idle_reason": spec["idle_reason"],
                 "wrist_conf": o.get("wrist_conf", self.wrist_conf),
                 "towel_margin": o.get("towel_margin", self.towel_margin),
+                "overlap_min": o.get("box_overlap_min", self.overlap_min),
+                "pose_min_kp": o.get("pose_min_keypoints", self.pose_min_kp),
             }
         if not self.ops:
             raise ValueError(f"Station {self.station_id}: no enabled operators")
@@ -149,7 +188,8 @@ class FrameLogic:
         op_cfg = CONFIG["operations"][self.station["operation"]]
         self.det_conf = op_cfg.get("conf_thresh", 0.6)
         self.detect_conf = min(
-            self.det_conf, self.person_conf, self.towel_conf, self.box_conf
+            self.det_conf, self.person_conf, self.towel_conf,
+            self.box_conf, self.bwt_conf,
         )
 
         self.det_model = YOLO(resolve_model_path(op_cfg["model"]))
@@ -164,6 +204,7 @@ class FrameLogic:
         self.person_class = person_ids[0]
 
         for what, names in (("Towel", [self.towel_name]),
+                            ("box_with_towel", [self.bwt_name]),
                             ("box_count classes", self.count_names),
                             ("ignore_classes", self.ignore_names)):
             bad = [n for n in names if n not in lower.values()]
@@ -173,7 +214,8 @@ class FrameLogic:
         ignore_ids = {i for i, n in lower.items() if n in self.ignore_names}
         self.detect_classes = [i for i in self.names if i not in ignore_ids]
 
-        print(f"[INFO] {camera_id}: operators {list(self.ops)}")
+        print(f"[INFO] {camera_id}: operators "
+              f"{ {k: v['logic_name'] for k, v in self.ops.items()} }")
 
         self.state = {oid: OperatorState() for oid in self.ops}
         self.raw = []
@@ -182,17 +224,18 @@ class FrameLogic:
 
     def process(self, frame):
         now = time.time()
-        persons, towels, objects, boxes = self._detect(frame)
+        persons, towels, bwts, objects, boxes = self._detect(frame)
 
+        ctx = {"towels": towels, "bwts": bwts}
         for p in persons:
             o = self.ops[p["op"]]
-            o["logic"](p, towels, o)            # sets p["working"]
+            o["logic"](p, ctx, o)               # sets p["working"]
 
         self._update_operators(persons, now)
         self._count_boxes(boxes, now)
 
         if self.draw:
-            self._draw(frame, persons, towels, objects, boxes)
+            self._draw(frame, persons, towels, bwts, objects, boxes)
 
         return frame
 
@@ -208,7 +251,7 @@ class FrameLogic:
             verbose=False,
         )[0]
 
-        people, towels, objects, boxes_out = [], [], [], []
+        people, towels, bwts, objects, boxes_out = [], [], [], [], []
         self.raw = []
 
         boxes = result.boxes
@@ -228,23 +271,28 @@ class FrameLogic:
                 elif lname == self.towel_name:
                     if conf >= self.towel_conf:
                         towels.append({"box": box, "conf": float(conf), "touched": False})
-                elif lname in self.count_names:
-                    if conf >= self.box_conf:
-                        cx = (box[0] + box[2]) / 2
-                        cy = (box[1] + box[3]) / 2
-                        boxes_out.append({
-                            "name": name, "conf": float(conf), "box": box,
-                            "on_table": _inside(self.table_roi, (cx, cy)),
-                        })
-                elif conf >= self.det_conf:
-                    objects.append({"name": name, "conf": float(conf), "box": box})
+                else:
+                    if lname == self.bwt_name and conf >= self.bwt_conf:
+                        bwts.append({"box": box, "conf": float(conf), "touched": False})
+
+                    if lname in self.count_names:
+                        if conf >= self.box_conf:
+                            cx = (box[0] + box[2]) / 2
+                            cy = (box[1] + box[3]) / 2
+                            boxes_out.append({
+                                "name": name, "conf": float(conf), "box": box,
+                                "on_table": _inside(self.table_roi, (cx, cy)),
+                            })
+                    elif lname != self.bwt_name and conf >= self.det_conf:
+                        objects.append({"name": name, "conf": float(conf), "box": box})
 
         persons = self._assign_operators(people)
 
         for p in persons:
-            p["kxy"], p["kconf"] = self._pose_on_crop(frame, p["box"])
+            if self.ops[p["op"]]["needs_pose"]:
+                p["kxy"], p["kconf"] = self._pose_on_crop(frame, p["box"])
 
-        return persons, towels, objects, boxes_out
+        return persons, towels, bwts, objects, boxes_out
 
     def _assign_operators(self, people):
         """A person is in an ROI if their centre or feet are inside it.
@@ -268,7 +316,7 @@ class FrameLogic:
             used_o.add(oid)
             out.append({
                 "box": people[i]["box"], "op": oid, "working": False,
-                "kxy": None, "kconf": None,
+                "kxy": None, "kconf": None, "pose_ok": False,
             })
         return out
 
@@ -308,13 +356,23 @@ class FrameLogic:
         return xy, conf
 
     # ---------------- operator logics ----------------
-    # Each logic gets (person, towels, operator settings) and sets
-    # person["working"] = True / False.
+    # Each logic gets (person, ctx, operator settings) and sets
+    # person["working"] = True / False.  ctx has "towels" and "bwts".
 
-    def _logic_wrist_on_towel(self, p, towels, o):
+    def _logic_wrist_on_towel(self, p, ctx, o):
+        """OP1-OP4: real pose AND a wrist on a towel -> working.
+        No towel, no pose, or an untrusted pose -> not working (IDLE)."""
         p["working"] = False
+        p["pose_ok"] = False
+
         if p["kxy"] is None:
             return
+
+        # Is this a real pose? Count the confidently detected keypoints.
+        confident = int((p["kconf"] > self.pose_kp_conf).sum())
+        if confident < o["pose_min_kp"]:
+            return
+        p["pose_ok"] = True
 
         margin = (p["box"][3] - p["box"][1]) * o["towel_margin"]
 
@@ -322,12 +380,24 @@ class FrameLogic:
             if p["kconf"][k] <= o["wrist_conf"]:
                 continue
             wx, wy = p["kxy"][k]
-            for t in towels:
+            for t in ctx["towels"]:
                 tx1, ty1, tx2, ty2 = t["box"]
                 if (tx1 - margin <= wx <= tx2 + margin
                         and ty1 - margin <= wy <= ty2 + margin):
                     p["working"] = True
                     t["touched"] = True
+
+    def _logic_box_with_towel_overlap(self, p, ctx, o):
+        """OP5: a box_with_towel overlaps the person's box."""
+        p["working"] = False
+        for b in ctx["bwts"]:
+            if _overlap_ratio(p["box"], b["box"]) >= o["overlap_min"]:
+                p["working"] = True
+                b["touched"] = True
+
+    def _logic_always_active(self, p, ctx, o):
+        """OP6: in the ROI means ACTIVE."""
+        p["working"] = True
 
     # ---------------- box counting ----------------
 
@@ -403,7 +473,7 @@ class FrameLogic:
         print(f"[STATUS] {self.camera_id} {oid}: {st.status} -> {state}")
 
         reason = (REASON_AWAY if state == AWAY
-                  else REASON_NO_TOUCH if state == IDLE else None)
+                  else self.ops[oid]["idle_reason"] if state == IDLE else None)
         try:
             if st.segment_id is not None:
                 operator_db.close_segment(
@@ -444,7 +514,7 @@ class FrameLogic:
 
     # ---------------- drawing ----------------
 
-    def _draw(self, frame, persons, towels, objects, boxes):
+    def _draw(self, frame, persons, towels, bwts, objects, boxes):
         cv2.polylines(frame, [self.table_roi], True, COLOR_TABLE, 4)
 
         if self.debug_draw:
@@ -481,6 +551,13 @@ class FrameLogic:
             cv2.putText(frame, f"{b['name']} {b['conf']:.2f}",
                         (x1, max(30, y1 - 10)), FONT, 1.0, color, 2)
 
+        for b in bwts:
+            x1, y1, x2, y2 = map(int, b["box"])
+            color = COLOR_ACTIVE if b["touched"] else OBJECT_COLORS["box_with_towel"]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 5 if b["touched"] else 2)
+            cv2.putText(frame, f"box_with_towel {b['conf']:.2f}",
+                        (x1, max(30, y1 - 10)), FONT, 0.9, color, 2)
+
         for t in towels:
             x1, y1, x2, y2 = map(int, t["box"])
             color = COLOR_ACTIVE if t["touched"] else OBJECT_COLORS["towel"]
@@ -505,8 +582,12 @@ class FrameLogic:
             cv2.putText(frame, label, (x1 + 10, top + th + 8),
                         FONT, 1.4, (0, 0, 0), 3)
 
+            # Wrist dots: green on a towel, red not, grey when the pose is not trusted
             if p["kxy"] is not None:
-                dot = COLOR_ACTIVE if p["working"] else (0, 0, 255)
+                if not p["pose_ok"]:
+                    dot = COLOR_NO_POSE
+                else:
+                    dot = COLOR_ACTIVE if p["working"] else (0, 0, 255)
                 wc = self.ops[oid]["wrist_conf"]
                 for k in WRISTS:
                     if p["kconf"][k] > wc:
