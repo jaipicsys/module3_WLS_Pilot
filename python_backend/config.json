@@ -48,7 +48,9 @@
     "pose_kp_conf": 0.4,
     "near_box_classes": ["Closed_Box", "box_with_towel"],
     "near_box_conf": 0.3,
-    "near_box_margin": 0.3
+    "near_box_margin": 0.3,
+    "wrist_box_classes": ["box_with_towel", "Closed_Box"],
+    "wrist_box_conf": 0.3
   },
 
   "lines": {
@@ -144,7 +146,7 @@
             },
             "OP3": {
               "enabled": true,
-              "logic": "wrist_on_towel",
+              "logic": "wrist_on_towel_or_box",
               "roi": [
                 [745, 645],
                 [819, 979],
@@ -154,7 +156,7 @@
             },
             "OP4": {
               "enabled": true,
-              "logic": "wrist_on_towel",
+              "logic": "wrist_on_towel_or_box",
               "roi": [
                 [608, 429],
                 [687, 664],
@@ -186,10 +188,10 @@
               "enabled": true,
               "logic": "always_active",
               "roi": [
-                [1131, 374],
-                [1201, 749],
-                [1487, 649],
-                [1349, 310]
+                [1033, 379],
+                [1297, 306],
+                [1493, 656],
+                [1134, 779]
               ]
             }
           }

@@ -50,6 +50,11 @@ LOGICS = {
         "needs_pose": True,
         "idle_reason": "No towel or pose not detected",
     },
+    "wrist_on_towel_or_box": {
+        "method": "_logic_wrist_on_towel_or_box",
+        "needs_pose": True,
+        "idle_reason": "Wrist not on towel or box",
+    },
     "box_with_towel_overlap": {
         "method": "_logic_box_with_towel_overlap",
         "needs_pose": False,
@@ -140,6 +145,9 @@ class FrameLogic:
                            cfg.get("near_box_classes", ["Closed_Box", "box_with_towel"])]
         self.near_conf = cfg.get("near_box_conf", 0.3)
         self.near_margin = cfg.get("near_box_margin", 0.3)
+        self.wobj_names = [n.lower() for n in
+                           cfg.get("wrist_box_classes", ["box_with_towel", "Closed_Box"])]
+        self.wobj_conf = cfg.get("wrist_box_conf", 0.3)
         self.hold = cfg.get("active_hold_seconds", 3)
         self.debounce = cfg.get("debounce_seconds", 0)
         self.away_seconds = cfg.get("away_seconds", 5)
@@ -214,6 +222,7 @@ class FrameLogic:
         self.detect_conf = min(
             self.det_conf, self.person_conf, self.towel_conf,
             self.bwt_conf, self.near_conf, self.trolley_conf, self.box_conf,
+            self.wobj_conf,
         )
 
         self.det_model = YOLO(resolve_model_path(op_cfg["model"]))
@@ -232,6 +241,7 @@ class FrameLogic:
                             ("trolley_class", [self.trolley_name]),
                             ("box_classes", self.box_names),
                             ("near_box_classes", self.near_names),
+                            ("wrist_box_classes", self.wobj_names),
                             ("ignore_classes", self.ignore_names)):
             bad = [n for n in names if n not in lower.values()]
             if bad:
@@ -250,9 +260,9 @@ class FrameLogic:
 
     def process(self, frame):
         now = time.time()
-        persons, towels, bwts, near, objects, boxes = self._detect(frame)
+        persons, towels, bwts, near, wobjs, objects, boxes = self._detect(frame)
 
-        ctx = {"towels": towels, "bwts": bwts, "near": near}
+        ctx = {"towels": towels, "bwts": bwts, "near": near, "wobjs": wobjs}
         for p in persons:
             o = self.ops[p["op"]]
             o["logic"](p, ctx, o)
@@ -261,7 +271,7 @@ class FrameLogic:
         self._count_boxes(now)
 
         if self.draw:
-            self._draw(frame, persons, towels, bwts, near, objects, boxes, now)
+            self._draw(frame, persons, towels, bwts, near, wobjs, objects, boxes, now)
 
         return frame
 
@@ -281,7 +291,8 @@ class FrameLogic:
             verbose=False,
         )[0]
 
-        people, towels, bwts, near, objects, boxes_out = [], [], [], [], [], []
+        people, towels, bwts, near, wobjs = [], [], [], [], []
+        objects, boxes_out = [], []
         c_trolleys, c_boxes = [], []
         self.raw = []
 
@@ -326,6 +337,10 @@ class FrameLogic:
                     near.append({"name": name, "box": box, "conf": float(conf),
                                  "touched": False})
 
+                if lname in self.wobj_names and conf >= self.wobj_conf:
+                    wobjs.append({"name": name, "box": box, "conf": float(conf),
+                                  "touched": False})
+
                 if not drawn and lname != self.bwt_name and conf >= self.det_conf:
                     objects.append({"name": name, "conf": float(conf), "box": box})
 
@@ -337,7 +352,7 @@ class FrameLogic:
             if self.ops[p["op"]]["needs_pose"]:
                 p["kxy"], p["kconf"] = self._pose_on_crop(frame, p["box"])
 
-        return persons, towels, bwts, near, objects, boxes_out
+        return persons, towels, bwts, near, wobjs, objects, boxes_out
 
     def _assign_operators(self, people):
         """A person is in an ROI if their centre or feet are inside it.
@@ -402,8 +417,8 @@ class FrameLogic:
 
     # ---------------- operator logics ----------------
 
-    def _logic_wrist_on_towel(self, p, ctx, o):
-        """Real pose AND a wrist on a towel -> working."""
+    def _wrist_hits(self, p, o, targets):
+        """Mark p working if a trusted wrist is inside any target box."""
         p["working"] = False
         p["pose_ok"] = False
 
@@ -421,12 +436,20 @@ class FrameLogic:
             if p["kconf"][k] <= o["wrist_conf"]:
                 continue
             wx, wy = p["kxy"][k]
-            for t in ctx["towels"]:
+            for t in targets:
                 tx1, ty1, tx2, ty2 = t["box"]
                 if (tx1 - margin <= wx <= tx2 + margin
                         and ty1 - margin <= wy <= ty2 + margin):
                     p["working"] = True
                     t["touched"] = True
+
+    def _logic_wrist_on_towel(self, p, ctx, o):
+        """Real pose AND a wrist on a towel -> working."""
+        self._wrist_hits(p, o, ctx["towels"])
+
+    def _logic_wrist_on_towel_or_box(self, p, ctx, o):
+        """Real pose AND a wrist on a towel or on a box -> working."""
+        self._wrist_hits(p, o, ctx["towels"] + ctx["wobjs"])
 
     def _logic_box_with_towel_overlap(self, p, ctx, o):
         """A box_with_towel overlaps the person's box."""
@@ -586,7 +609,7 @@ class FrameLogic:
 
     # ---------------- drawing ----------------
 
-    def _draw(self, frame, persons, towels, bwts, near, objects, boxes, now):
+    def _draw(self, frame, persons, towels, bwts, near, wobjs, objects, boxes, now):
         self.counter.draw(frame, now)
 
         if self.debug_draw:
@@ -630,6 +653,12 @@ class FrameLogic:
                         (x1, max(30, y1 - 10)), FONT, 0.9, color, 2)
 
         for b in near:
+            if b["touched"]:
+                x1, y1, x2, y2 = map(int, b["box"])
+                cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_ACTIVE, 5)
+
+        # Boxes a wrist is on (OP3 / OP4): thick green outline
+        for b in wobjs:
             if b["touched"]:
                 x1, y1, x2, y2 = map(int, b["box"])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_ACTIVE, 5)
