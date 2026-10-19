@@ -9,6 +9,8 @@ import torch
 from ultralytics import YOLO
 
 import operator_db
+import unit_count_db
+from box_counter import BoxCounter
 from config_utils import (
     BASE_DIR,
     CONFIG,
@@ -32,6 +34,7 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 OBJECT_COLORS = {
     "towel": (255, 160, 0),
     "closed_box": (0, 165, 255),
+    "box_with_towel": (0, 200, 255),
     "trolly_box": (255, 0, 200),
     "yellow_person": (0, 255, 255),
 }
@@ -39,6 +42,7 @@ OBJECT_COLORS = {
 COLOR_ACTIVE = (0, 200, 0)
 COLOR_IDLE = (0, 165, 255)
 COLOR_STATION = (255, 255, 0)
+COLOR_TABLE = (255, 0, 255)
 COLOR_PENDING = (200, 200, 200)
 COLOR_IGNORED = (130, 130, 130)
 
@@ -78,10 +82,9 @@ class OperatorStatus:
 
 class FrameLogic:
     """
-    ByteTrack ids in monitor_ids are checked, everyone else is ignored.
-      wrist on towel                   -> ACTIVE
-      no wrist on towel for 3 seconds  -> IDLE
-      id not inside the station ROI    -> AWAY
+    1. Operators: ByteTrack ids in monitor_ids are checked.
+         wrist on towel -> ACTIVE, none for 3 s -> IDLE, left ROI -> AWAY
+    2. Boxes: closed boxes that leave the table ROI are counted into unit_count.
     """
 
     def __init__(self, camera_id):
@@ -116,6 +119,15 @@ class FrameLogic:
         self.ignore_names = [n.lower() for n in cfg.get("ignore_classes", [])]
         self.draw = CONFIG.get("enable_display", False)
 
+        # ---- box counting settings ----
+        bc = self.station.get("box_count")
+        if not bc or len(bc.get("roi") or []) < 3:
+            raise ValueError(f"Station {self.station_id} needs 'box_count' with an 'roi'")
+        self.table_roi = _poly(bc["roi"])
+        self.count_names = [n.lower() for n in bc.get("classes", ["Closed_Box"])]
+        self.box_conf = bc.get("conf", 0.5)
+        self.counter = BoxCounter(leave_seconds=bc.get("leave_seconds", 3))
+
         device = CONFIG.get("device", "auto")
         if device == "auto":
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -131,7 +143,9 @@ class FrameLogic:
 
         op_cfg = CONFIG["operations"][self.station["operation"]]
         self.det_conf = op_cfg.get("conf_thresh", 0.6)
-        self.detect_conf = min(self.det_conf, self.person_conf, self.towel_conf)
+        self.detect_conf = min(
+            self.det_conf, self.person_conf, self.towel_conf, self.box_conf
+        )
 
         self.det_model = YOLO(resolve_model_path(op_cfg["model"]))
         self.pose_model = YOLO(resolve_model_path(CONFIG["pose_model"]))
@@ -149,6 +163,10 @@ class FrameLogic:
                 f"Towel class '{self.towel_name}' not found in model: {self.names}"
             )
 
+        missing = [n for n in self.count_names if n not in lower_names.values()]
+        if missing:
+            raise ValueError(f"box_count classes {missing} not in model: {self.names}")
+
         unknown = [n for n in self.ignore_names if n not in lower_names.values()]
         if unknown:
             raise ValueError(
@@ -158,7 +176,8 @@ class FrameLogic:
         self.detect_classes = [i for i in self.names if i not in ignore_ids]
 
         print(f"[INFO] {camera_id}: monitoring ids "
-              f"{sorted(self.monitor_ids) if self.monitor_ids else 'ALL'}")
+              f"{sorted(self.monitor_ids) if self.monitor_ids else 'ALL'}, "
+              f"counting {self.count_names}")
 
         self.operators = {}     # track id -> OperatorStatus
 
@@ -166,13 +185,14 @@ class FrameLogic:
 
     def process(self, frame):
         now = time.time()
-        persons, towels, objects = self._detect(frame)
+        persons, towels, objects, boxes = self._detect(frame)
 
         self._check_wrists(persons, towels)
         self._update_operators(persons, now)
+        self._count_boxes(boxes, now)
 
         if self.draw:
-            self._draw(frame, persons, towels, objects)
+            self._draw(frame, persons, towels, objects, boxes)
 
         return frame
 
@@ -198,7 +218,7 @@ class FrameLogic:
             verbose=False,
         )[0]
 
-        persons, towels, objects = [], [], []
+        persons, towels, objects, boxes_out = [], [], [], []
 
         boxes = result.boxes
         if boxes is not None and len(boxes) > 0:
@@ -213,6 +233,7 @@ class FrameLogic:
 
             for box, cls, conf, tid in zip(xyxy, classes, confs, ids):
                 name = self.names[cls]
+                lname = name.lower()
 
                 if cls == self.person_class:
                     if tid is None or conf < self.person_conf:
@@ -224,10 +245,18 @@ class FrameLogic:
                         "monitored": self._monitored(tid),
                         "kxy": None, "kconf": None, "touching": False,
                     })
-                elif name.lower() == self.towel_name:
+                elif lname == self.towel_name:
                     if conf >= self.towel_conf:
                         towels.append({
                             "box": box, "conf": float(conf), "touched": False,
+                        })
+                elif lname in self.count_names:
+                    if conf >= self.box_conf:
+                        cx = (box[0] + box[2]) / 2
+                        cy = (box[1] + box[3]) / 2
+                        boxes_out.append({
+                            "name": name, "conf": float(conf), "box": box,
+                            "on_table": _inside(self.table_roi, (cx, cy)),
                         })
                 elif conf >= self.det_conf:
                     objects.append({"name": name, "conf": float(conf), "box": box})
@@ -237,7 +266,7 @@ class FrameLogic:
             if p["monitored"]:
                 p["kxy"], p["kconf"] = self._pose_on_crop(frame, p["box"])
 
-        return persons, towels, objects
+        return persons, towels, objects, boxes_out
 
     def _pose_on_crop(self, frame, box):
         """Pose of ONE person; with overlap, take the pose nearest to this box."""
@@ -277,6 +306,35 @@ class FrameLogic:
             else np.ones(len(xy))
         )
         return xy, conf
+
+    # ---------------- box counting ----------------
+
+    def _count_boxes(self, boxes, now):
+        present = sum(1 for b in boxes if b["on_table"])
+        n = self.counter.update(present, now)
+
+        if n <= 0:
+            return
+
+        now_dt = datetime.now()
+        shift, _ = get_shift_and_break(self.line, now_dt)
+        info = {
+            "line_id": self.line_id,
+            "product_name": self.line.get("product_name"),
+            "shift_id": shift["shift_id"] if shift else None,
+            "shift_timings": shift["timings"] if shift else None,
+            "operation": self.station.get("operation"),
+            "station_name": self.station.get("station_name"),
+            "cam_id": _cam_number(self.camera_id),
+            "plant": CONFIG.get("plant"),
+        }
+
+        try:
+            unit_count_db.add_count(info, n, now_dt)
+            print(f"[COUNT] {self.camera_id}: +{n} box(es), "
+                  f"session total {self.counter.total}")
+        except Exception as e:
+            print(f"[ERROR] unit_count write failed: {e}")
 
     # ---------------- wrist on towel ----------------
 
@@ -425,13 +483,22 @@ class FrameLogic:
 
     # ---------------- drawing ----------------
 
-    def _draw(self, frame, persons, towels, objects):
+    def _draw(self, frame, persons, towels, objects, boxes):
         cv2.polylines(frame, [self.station_roi], True, COLOR_STATION, 4)
+        cv2.polylines(frame, [self.table_roi], True, COLOR_TABLE, 4)
 
         for o in objects:
             x1, y1, x2, y2 = map(int, o["box"])
             color = OBJECT_COLORS.get(o["name"].lower(), (200, 200, 0))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # Counted-class boxes: thick when on the table
+        for b in boxes:
+            x1, y1, x2, y2 = map(int, b["box"])
+            color = OBJECT_COLORS.get(b["name"].lower(), (0, 165, 255))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 6 if b["on_table"] else 2)
+            cv2.putText(frame, f"{b['name']} {b['conf']:.2f}",
+                        (x1, max(30, y1 - 10)), FONT, 1.0, color, 2)
 
         for t in towels:
             x1, y1, x2, y2 = map(int, t["box"])
@@ -471,10 +538,18 @@ class FrameLogic:
                         x, y = p["kxy"][k]
                         cv2.circle(frame, (int(x), int(y)), 10, dot, -1)
 
-        # Away list
+        # Away list (top-left)
         y = 60
         for tid, op in self.operators.items():
             if op.status == AWAY:
                 cv2.putText(frame, f"P{tid} AWAY", (30, y),
                             FONT, 1.4, (60, 60, 255), 3)
                 y += 50
+
+        # Box counter (bottom-left)
+        h = frame.shape[0]
+        cv2.putText(
+            frame,
+            f"Boxes on table: {self.counter.stable}   Counted: {self.counter.total}",
+            (30, h - 40), FONT, 1.8, (255, 255, 255), 5,
+        )

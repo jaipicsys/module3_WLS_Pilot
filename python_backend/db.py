@@ -122,12 +122,16 @@ def init_unit_count_table(conn):
             station_name TEXT,
             cam_id INTEGER,
             unit_count INTEGER,
-            plant TEXT DEFAULT 'Unit 1 Textile'
+            plant TEXT DEFAULT 'Unit 1 Textile',
+            count_date TEXT,
+            updated_at TEXT
         )
     """)
 
     add_missing_columns(conn, "unit_count", {
-        "plant": "TEXT DEFAULT 'Unit 1 Textile'"
+        "plant": "TEXT DEFAULT 'Unit 1 Textile'",
+        "count_date": "TEXT",
+        "updated_at": "TEXT",
     })
 
 
