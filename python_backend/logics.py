@@ -32,7 +32,7 @@ OBJECT_COLORS = {
     "towel": (255, 160, 0),
     "closed_box": (0, 165, 255),
     "box_with_towel": (0, 200, 255),
-    "trolly_box": (255, 0, 200),
+    "trolly_box": (255, 120, 0),
     "yellow_person": (0, 255, 255),
 }
 
@@ -40,15 +40,10 @@ COLOR_ACTIVE = (0, 200, 0)
 COLOR_IDLE = (0, 165, 255)
 COLOR_AWAY = (60, 60, 255)
 COLOR_SEAT = (0, 255, 255)
-COLOR_TABLE = (255, 0, 255)
 COLOR_PENDING = (200, 200, 200)
 COLOR_DEBUG = (255, 255, 255)
 COLOR_NO_POSE = (130, 130, 130)
 
-# Logic name (config "logic") -> settings.
-#   method      : FrameLogic method that sets p["working"]
-#   needs_pose  : run the pose model for this operator
-#   idle_reason : text written to "reasons" when the operator is IDLE
 LOGICS = {
     "wrist_on_towel": {
         "method": "_logic_wrist_on_towel",
@@ -100,27 +95,24 @@ def _overlap_ratio(person_box, obj_box):
 
 
 def _boxes_touch(a, b):
-    """True if the two boxes overlap at all."""
     return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
 
 
 class OperatorState:
     def __init__(self):
-        self.status = None          # committed status
+        self.status = None
         self.since = None
         self.segment_id = None
         self.candidate = None
         self.candidate_since = None
-        self.last_seen = None       # last time a person was in the ROI
-        self.last_touch = None      # last time the logic said "working"
+        self.last_seen = None
+        self.last_touch = None
 
 
 class FrameLogic:
     """
-    One ROI per operator, each with its own logic.
-      person in ROI + logic says working -> ACTIVE
-      person in ROI, not working         -> IDLE
-      nobody in ROI for away_seconds     -> AWAY
+    1. Operators: one ROI each, own logic -> ACTIVE / IDLE / AWAY.
+    2. Boxes: BoxCounter (line crossing while a trolley is in the zone).
     """
 
     def __init__(self, camera_id):
@@ -184,13 +176,28 @@ class FrameLogic:
             raise ValueError(f"Station {self.station_id}: no enabled operators")
 
         # ---- box counting ----
-        bc = self.station.get("box_count")
-        if not bc or len(bc.get("roi") or []) < 3:
-            raise ValueError(f"Station {self.station_id} needs 'box_count' with an 'roi'")
-        self.table_roi = _poly(bc["roi"])
-        self.count_names = [n.lower() for n in bc.get("classes", ["Closed_Box"])]
-        self.box_conf = bc.get("conf", 0.5)
-        self.counter = BoxCounter(leave_seconds=bc.get("leave_seconds", 3))
+        bc = self.station.get("box_count") or {}
+        zone = bc.get("zone") or []
+        line = bc.get("line") or []
+        if len(zone) < 3:
+            raise ValueError(f"Station {self.station_id}: box_count.zone needs 3+ points")
+        if len(line) != 3:
+            raise ValueError(f"Station {self.station_id}: box_count.line needs 3 points")
+
+        self.trolley_name = bc.get("trolley_class", "Trolly_Box").lower()
+        self.box_names = [n.lower() for n in bc.get("box_classes", ["Closed_Box"])]
+        self.trolley_conf = bc.get("trolley_conf", 0.4)
+        self.box_conf = bc.get("box_conf", 0.4)
+
+        self.counter = BoxCounter(
+            zone=zone,
+            line=tuple(tuple(p) for p in line),
+            full_count=bc.get("boxes_per_trolley", 12),
+            absent_s=bc.get("trolley_absent_s", 5),
+            cooldown_s=bc.get("cooldown_s", 5),
+        )
+        self._last_sets = 0
+        self._cin = {"trolleys": [], "boxes": []}
 
         # ---- device ----
         device = CONFIG.get("device", "auto")
@@ -205,7 +212,7 @@ class FrameLogic:
         self.det_conf = op_cfg.get("conf_thresh", 0.6)
         self.detect_conf = min(
             self.det_conf, self.person_conf, self.towel_conf,
-            self.box_conf, self.bwt_conf, self.near_conf,
+            self.bwt_conf, self.near_conf, self.trolley_conf, self.box_conf,
         )
 
         self.det_model = YOLO(resolve_model_path(op_cfg["model"]))
@@ -221,7 +228,8 @@ class FrameLogic:
 
         for what, names in (("Towel", [self.towel_name]),
                             ("box_with_towel", [self.bwt_name]),
-                            ("box_count classes", self.count_names),
+                            ("trolley_class", [self.trolley_name]),
+                            ("box_classes", self.box_names),
                             ("near_box_classes", self.near_names),
                             ("ignore_classes", self.ignore_names)):
             bad = [n for n in names if n not in lower.values()]
@@ -246,15 +254,19 @@ class FrameLogic:
         ctx = {"towels": towels, "bwts": bwts, "near": near}
         for p in persons:
             o = self.ops[p["op"]]
-            o["logic"](p, ctx, o)               # sets p["working"]
+            o["logic"](p, ctx, o)
 
         self._update_operators(persons, now)
-        self._count_boxes(boxes, now)
+        self._count_boxes(now)
 
         if self.draw:
-            self._draw(frame, persons, towels, bwts, near, objects, boxes)
+            self._draw(frame, persons, towels, bwts, near, objects, boxes, now)
 
         return frame
+
+    def on_stream_gap(self):
+        """Called by the camera worker when the stream drops."""
+        self.counter.reset_tracks()
 
     # ---------------- detection ----------------
 
@@ -269,6 +281,7 @@ class FrameLogic:
         )[0]
 
         people, towels, bwts, near, objects, boxes_out = [], [], [], [], [], []
+        c_trolleys, c_boxes = [], []
         self.raw = []
 
         boxes = result.boxes
@@ -281,6 +294,7 @@ class FrameLogic:
                 name = self.names[cls]
                 lname = name.lower()
                 self.raw.append((name, float(conf), box))
+                tbox = tuple(float(v) for v in box)
 
                 if cls == self.person_class:
                     if conf >= self.person_conf:
@@ -292,6 +306,18 @@ class FrameLogic:
                         towels.append({"box": box, "conf": float(conf), "touched": False})
                     continue
 
+                drawn = False
+
+                if lname == self.trolley_name and conf >= self.trolley_conf:
+                    c_trolleys.append(tbox)
+                    boxes_out.append({"name": name, "conf": float(conf), "box": box})
+                    drawn = True
+
+                if lname in self.box_names and conf >= self.box_conf:
+                    c_boxes.append(tbox)
+                    boxes_out.append({"name": name, "conf": float(conf), "box": box})
+                    drawn = True
+
                 if lname == self.bwt_name and conf >= self.bwt_conf:
                     bwts.append({"box": box, "conf": float(conf), "touched": False})
 
@@ -299,16 +325,10 @@ class FrameLogic:
                     near.append({"name": name, "box": box, "conf": float(conf),
                                  "touched": False})
 
-                if lname in self.count_names:
-                    if conf >= self.box_conf:
-                        cx = (box[0] + box[2]) / 2
-                        cy = (box[1] + box[3]) / 2
-                        boxes_out.append({
-                            "name": name, "conf": float(conf), "box": box,
-                            "on_table": _inside(self.table_roi, (cx, cy)),
-                        })
-                elif lname != self.bwt_name and conf >= self.det_conf:
+                if not drawn and lname != self.bwt_name and conf >= self.det_conf:
                     objects.append({"name": name, "conf": float(conf), "box": box})
+
+        self._cin = {"trolleys": c_trolleys, "boxes": c_boxes}
 
         persons = self._assign_operators(people)
 
@@ -380,13 +400,9 @@ class FrameLogic:
         return xy, conf
 
     # ---------------- operator logics ----------------
-    # Each logic gets (person, ctx, operator settings) and sets
-    # person["working"] = True / False.
-    # ctx has "towels", "bwts" and "near" (boxes for the box_near logic).
 
     def _logic_wrist_on_towel(self, p, ctx, o):
-        """OP1-OP4: real pose AND a wrist on a towel -> working.
-        No towel, no pose, or an untrusted pose -> not working (IDLE)."""
+        """Real pose AND a wrist on a towel -> working."""
         p["working"] = False
         p["pose_ok"] = False
 
@@ -412,7 +428,7 @@ class FrameLogic:
                     t["touched"] = True
 
     def _logic_box_with_towel_overlap(self, p, ctx, o):
-        """OP5: a box_with_towel overlaps the person's box."""
+        """A box_with_towel overlaps the person's box."""
         p["working"] = False
         for b in ctx["bwts"]:
             if _overlap_ratio(p["box"], b["box"]) >= o["overlap_min"]:
@@ -420,12 +436,11 @@ class FrameLogic:
                 b["touched"] = True
 
     def _logic_always_active(self, p, ctx, o):
-        """OP6: in the ROI means ACTIVE."""
+        """In the ROI means ACTIVE."""
         p["working"] = True
 
     def _logic_box_near(self, p, ctx, o):
-        """OP7: a box is near him (touching his box, grown by near_margin
-        of his height) -> working. No box near -> waiting (IDLE)."""
+        """A box is near him -> working. No box near -> waiting (IDLE)."""
         p["working"] = False
 
         x1, y1, x2, y2 = p["box"]
@@ -439,9 +454,14 @@ class FrameLogic:
 
     # ---------------- box counting ----------------
 
-    def _count_boxes(self, boxes, now):
-        present = sum(1 for b in boxes if b["on_table"])
-        n = self.counter.update(present, now)
+    def _count_boxes(self, now):
+        n = self.counter.update(now, self._cin["trolleys"], self._cin["boxes"])
+
+        if self.counter.sets > self._last_sets:
+            print(f"[SET] {self.camera_id}: trolley complete, "
+                  f"sets {self.counter.sets}")
+            self._last_sets = self.counter.sets
+
         if n <= 0:
             return
 
@@ -460,7 +480,7 @@ class FrameLogic:
         try:
             unit_count_db.add_count(info, n, now_dt)
             print(f"[COUNT] {self.camera_id}: +{n} box(es), "
-                  f"session total {self.counter.total}")
+                  f"on trolley {self.counter.on_trolley}/{self.counter.full_count}")
         except Exception as e:
             print(f"[ERROR] unit_count write failed: {e}")
 
@@ -485,7 +505,6 @@ class FrameLogic:
                   and now - st.last_seen >= self.away_seconds
                   and st.status is not None
                   and st.status != AWAY):
-                # nobody for away_seconds: AWAY, backdated to last seen
                 self._commit(oid, st, AWAY, st.last_seen)
 
     def _update_status(self, oid, st, raw, now):
@@ -552,8 +571,8 @@ class FrameLogic:
 
     # ---------------- drawing ----------------
 
-    def _draw(self, frame, persons, towels, bwts, near, objects, boxes):
-        cv2.polylines(frame, [self.table_roi], True, COLOR_TABLE, 4)
+    def _draw(self, frame, persons, towels, bwts, near, objects, boxes, now):
+        self.counter.draw(frame, now)
 
         if self.debug_draw:
             for name, conf, box in self.raw:
@@ -563,7 +582,6 @@ class FrameLogic:
                             (x1, min(frame.shape[0] - 5, y2 + 22)),
                             FONT, 0.7, COLOR_DEBUG, 2)
 
-        # Operator ROIs with their status
         occupied = {p["op"] for p in persons}
         for oid, o in self.ops.items():
             cv2.polylines(frame, [o["roi"]], True, COLOR_SEAT, 3)
@@ -585,9 +603,9 @@ class FrameLogic:
         for b in boxes:
             x1, y1, x2, y2 = map(int, b["box"])
             color = OBJECT_COLORS.get(b["name"].lower(), (0, 165, 255))
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 6 if b["on_table"] else 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"{b['name']} {b['conf']:.2f}",
-                        (x1, max(30, y1 - 10)), FONT, 1.0, color, 2)
+                        (x1, max(30, y1 - 10)), FONT, 0.8, color, 2)
 
         for b in bwts:
             x1, y1, x2, y2 = map(int, b["box"])
@@ -596,7 +614,6 @@ class FrameLogic:
             cv2.putText(frame, f"box_with_towel {b['conf']:.2f}",
                         (x1, max(30, y1 - 10)), FONT, 0.9, color, 2)
 
-        # Boxes that count as "near" an operator (OP7): green outline
         for b in near:
             if b["touched"]:
                 x1, y1, x2, y2 = map(int, b["box"])
@@ -626,21 +643,11 @@ class FrameLogic:
             cv2.putText(frame, label, (x1 + 10, top + th + 8),
                         FONT, 1.4, (0, 0, 0), 3)
 
-            # Wrist dots: green on a towel, red not, grey when the pose is not trusted
             if p["kxy"] is not None:
-                if not p["pose_ok"]:
-                    dot = COLOR_NO_POSE
-                else:
-                    dot = COLOR_ACTIVE if p["working"] else (0, 0, 255)
+                dot = COLOR_NO_POSE if not p["pose_ok"] else (
+                    COLOR_ACTIVE if p["working"] else (0, 0, 255))
                 wc = self.ops[oid]["wrist_conf"]
                 for k in WRISTS:
                     if p["kconf"][k] > wc:
                         x, y = p["kxy"][k]
                         cv2.circle(frame, (int(x), int(y)), 10, dot, -1)
-
-        h = frame.shape[0]
-        cv2.putText(
-            frame,
-            f"Boxes on table: {self.counter.stable}   Counted: {self.counter.total}",
-            (30, h - 40), FONT, 1.8, (255, 255, 255), 5,
-        )

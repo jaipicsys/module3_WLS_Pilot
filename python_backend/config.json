@@ -16,7 +16,7 @@
   "plant": "Unit 1 Textile",
 
   "rtsp_urls": {
-    "cam1": "rtsp://192.168.2.237:8554/cam1"
+    "cam1": "rtsp://192.168.2.10:8554/cam1"
   },
 
   "models_dir": "models",
@@ -102,15 +102,24 @@
             [297, 1069]
           ],
           "box_count": {
-            "roi": [
-              [465, 722],
-              [1289, 508],
-              [1449, 621],
-              [521, 906]
+            "trolley_class": "Trolly_Box",
+            "box_classes": ["Closed_Box"],
+            "trolley_conf": 0.4,
+            "box_conf": 0.4,
+            "boxes_per_trolley": 12,
+            "trolley_absent_s": 5,
+            "cooldown_s": 5,
+            "zone": [
+              [1417, 564],
+              [1578, 437],
+              [1703, 563],
+              [1563, 663]
             ],
-            "classes": ["Closed_Box"],
-            "conf": 0.5,
-            "leave_seconds": 3
+            "line": [
+              [1456, 626],
+              [1275, 525],
+              [1440, 588]
+            ]
           },
           "operators": {
             "OP1": {
@@ -178,10 +187,11 @@
               "logic": "box_near",
               "active_hold_seconds": 3,
               "roi": [
-                [1131, 374],
-                [1201, 749],
-                [1487, 649],
-                [1349, 310]
+                [1051, 354],
+                [1138, 764],
+                [1483, 625],
+                [1259, 273],
+                [1052, 351]
               ]
             }
           }
