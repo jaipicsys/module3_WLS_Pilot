@@ -269,9 +269,14 @@ export const fetchCameraFrame = async (camId) => {
   return `data:image/jpeg;base64,${data.image}`;
 };
 
-export const getKpiCards = async () => {
+/* ---------------- Overview page ---------------- */
+
+// The four KPI cards: total output, output/hour, productive time, idle time.
+export const getKpiCards = async (mode = "live") => {
   const API_BASE_URL = await getApiBaseUrl();
-  const res = await fetch(`${API_BASE_URL}/api/kpi-cards`);
+  const res = await fetch(
+    `${API_BASE_URL}/api/kpi-cards?mode=${encodeURIComponent(mode)}`,
+  );
 
   if (!res.ok) {
     throw new Error(`Failed to fetch KPI cards (${res.status})`);
@@ -280,9 +285,12 @@ export const getKpiCards = async () => {
   return res.json();
 };
 
-export const getOutputTrend = async () => {
+// Output Trend chart: units per 5 minutes -> { interval_minutes, date, series: [{ time, label, output, target }] }
+export const getOutputTrend = async (mode = "live") => {
   const API_BASE_URL = await getApiBaseUrl();
-  const res = await fetch(`${API_BASE_URL}/api/output-trend`);
+  const res = await fetch(
+    `${API_BASE_URL}/api/output-trend?mode=${encodeURIComponent(mode)}`,
+  );
 
   if (!res.ok) {
     throw new Error(`Failed to fetch output trend (${res.status})`);
@@ -292,9 +300,11 @@ export const getOutputTrend = async () => {
 };
 
 // Output by Product chart -> { products: [{ name, value, placeholder }] }
-export const getOutputByProduct = async () => {
+export const getOutputByProduct = async (mode = "live") => {
   const API_BASE_URL = await getApiBaseUrl();
-  const res = await fetch(`${API_BASE_URL}/api/output-by-product`);
+  const res = await fetch(
+    `${API_BASE_URL}/api/output-by-product?mode=${encodeURIComponent(mode)}`,
+  );
 
   if (!res.ok) {
     throw new Error(`Failed to fetch output by product (${res.status})`);
@@ -303,9 +313,12 @@ export const getOutputByProduct = async () => {
   return res.json();
 };
 
-export const getTopOperators = async () => {
+// Top Operators table -> { operators: [{ rank, operator_id, active_display, idle_display, away_display, utilization_pct, ... }] }
+export const getTopOperators = async (mode = "live") => {
   const API_BASE_URL = await getApiBaseUrl();
-  const res = await fetch(`${API_BASE_URL}/api/top-operators`);
+  const res = await fetch(
+    `${API_BASE_URL}/api/top-operators?mode=${encodeURIComponent(mode)}`,
+  );
 
   if (!res.ok) {
     throw new Error(`Failed to fetch top operators (${res.status})`);
@@ -315,9 +328,11 @@ export const getTopOperators = async () => {
 };
 
 // Loss Breakdown chart -> { total_display, items: [{ label, type, display, pct, seconds }] }
-export const getLossBreakdown = async () => {
+export const getLossBreakdown = async (mode = "live") => {
   const API_BASE_URL = await getApiBaseUrl();
-  const res = await fetch(`${API_BASE_URL}/api/loss-breakdown`);
+  const res = await fetch(
+    `${API_BASE_URL}/api/loss-breakdown?mode=${encodeURIComponent(mode)}`,
+  );
 
   if (!res.ok) {
     throw new Error(`Failed to fetch loss breakdown (${res.status})`);
@@ -326,6 +341,7 @@ export const getLossBreakdown = async () => {
   return res.json();
 };
 
+// Live feed: configured cameras -> { cameras: [{ id, online }] }
 export const getCameras = async () => {
   const API_BASE_URL = await getApiBaseUrl();
   const res = await fetch(`${API_BASE_URL}/api/cameras`);
@@ -368,4 +384,16 @@ export const getLiveCameraFeed = async (camId) => {
   return {
     streamUrl: `${API_BASE_URL}/api/camera/${encodeURIComponent(camId)}/stream?t=${Date.now()}`,
   };
+};
+
+// Which modes can be used -> { modes: [{ id: "live", available }, { id: "recorded", available, from, to }] }
+export const getModes = async () => {
+  const API_BASE_URL = await getApiBaseUrl();
+  const res = await fetch(`${API_BASE_URL}/api/modes`);
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch modes (${res.status})`);
+  }
+
+  return res.json();
 };

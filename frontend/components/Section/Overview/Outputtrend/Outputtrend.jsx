@@ -41,11 +41,10 @@ function LegendDot({ color, dashed, label, c }) {
 }
 
 /*
- * Output per 5 minutes.
- * Loads from the API and refreshes every 10 seconds.
- * Pass data ([{ time, output, target }]) to override the API.
+ * Output per 5 minutes. Loads from the API and refreshes every 10 seconds.
+ * Pass `data` ([{ time, output, target }]) to override the API.
  */
-export default function OutputTrend({ data, height = 300 }) {
+export default function OutputTrend({ data, mode = "live", height = 300 }) {
   const c = useDashboardColors();
   const [series, setSeries] = useState([]);
 
@@ -53,11 +52,11 @@ export default function OutputTrend({ data, height = 300 }) {
     if (data) return undefined;
 
     let active = true;
+    setSeries([]); // clear the other mode's data
 
     const load = async () => {
       try {
-        const res = await getOutputTrend();
-
+        const res = await getOutputTrend(mode);
         if (active) {
           setSeries(
             (res.series || []).map((p) => ({
@@ -73,19 +72,17 @@ export default function OutputTrend({ data, height = 300 }) {
     };
 
     load();
-
     const intervalId = setInterval(load, 10000);
 
     return () => {
       active = false;
       clearInterval(intervalId);
     };
-  }, [data]);
+  }, [data, mode]);
 
   const chartData = data ?? series;
 
-  // Show every label for short ranges; thin them out when
-  // there are many bars.
+  // Show every label for short ranges; thin them out when there are many bars.
   const tickInterval = Math.max(0, Math.ceil(chartData.length / 8) - 1);
 
   return (
@@ -128,10 +125,7 @@ export default function OutputTrend({ data, height = 300 }) {
               angle: -90,
               position: "insideLeft",
               offset: 16,
-              style: {
-                fontSize: 11,
-                fill: c.muted,
-              },
+              style: { fontSize: 11, fill: c.muted },
             }}
           />
 

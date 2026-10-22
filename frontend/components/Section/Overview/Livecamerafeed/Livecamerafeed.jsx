@@ -19,13 +19,12 @@ export default function LiveCameraFeed({
   cameraId = "cam1",
   title = "Live Camera Feed",
   height = 420,
+  mode = "live",
 }) {
   const [streamUrl, setStreamUrl] = useState("");
   const [status, setStatus] = useState("connecting");
   const [error, setError] = useState("");
-  const [retryCount, setRetryCount] = useState(0);
 
-  // Fetch the stream URL from the API
   const loadFeed = useCallback(async () => {
     setStatus("connecting");
     setError("");
@@ -40,40 +39,66 @@ export default function LiveCameraFeed({
 
       setStreamUrl(response.streamUrl);
       setStatus("live");
-      setRetryCount(0);
     } catch (err) {
       console.error("Failed to load camera feed:", err);
-
       setStatus("disconnected");
       setError(err.message || "Unable to connect to the camera.");
-
-      setRetryCount((count) => count + 1);
     }
   }, [cameraId]);
 
-  // Initial connection and reconnect when the camera ID changes
   useEffect(() => {
+    if (mode === "recorded") return; // no live connection while viewing a recording
     loadFeed();
-  }, [loadFeed]);
+  }, [loadFeed, mode]);
 
-  // Automatically retry when disconnected
-  useEffect(() => {
-    if (status !== "disconnected") return undefined;
-
-    const timer = setTimeout(() => {
-      loadFeed();
-    }, RECONNECT_DELAY);
-
-    return () => clearTimeout(timer);
-  }, [status, retryCount, loadFeed]);
-
-  // Handle MJPEG stream errors
   const handleStreamError = () => {
     setStatus("disconnected");
     setError("The video stream could not be played.");
-    setStreamUrl("");
-    setRetryCount((count) => count + 1);
   };
+
+  /* Recorded section: the live camera is not shown */
+  if (mode === "recorded") {
+    return (
+      <Paper
+        variant="outlined"
+        sx={{
+          borderRadius: 2,
+          overflow: "hidden",
+          bgcolor: "background.paper",
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1.25} sx={{ p: 2 }}>
+          <VideocamOutlinedIcon color="action" />
+          <Typography variant="subtitle1" fontWeight={600}>
+            {title}
+          </Typography>
+        </Stack>
+
+        <Box
+          sx={{
+            bgcolor: "#111",
+            width: "100%",
+            height,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            px: 3,
+            textAlign: "center",
+          }}
+        >
+          <Stack alignItems="center" spacing={1}>
+            <SignalWifiStatusbar4BarIcon sx={{ fontSize: 42, color: "#999" }} />
+            <Typography color="white" fontWeight={500}>
+              Feed not available
+            </Typography>
+            <Typography variant="body2" sx={{ color: "#bbb" }}>
+              You are in the Recorded section. Switch to Live to see the camera.
+            </Typography>
+          </Stack>
+        </Box>
+      </Paper>
+    );
+  }
 
   return (
     <Paper
@@ -90,11 +115,7 @@ export default function LiveCameraFeed({
         alignItems="center"
         justifyContent="space-between"
         spacing={2}
-        sx={{
-          p: 2,
-          flexWrap: "wrap",
-          rowGap: 1.5,
-        }}
+        sx={{ p: 2 }}
       >
         <Stack direction="row" alignItems="center" spacing={1.25}>
           <VideocamOutlinedIcon color="action" />
@@ -130,10 +151,19 @@ export default function LiveCameraFeed({
             variant="outlined"
           />
 
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<RefreshIcon />}
+            onClick={loadFeed}
+            disabled={status === "connecting"}
+          >
+            Refresh
+          </Button>
         </Stack>
       </Stack>
 
-      {/* Live camera feed */}
+      {/* Live picture (the backend sends MJPEG, which an <img> plays natively) */}
       <Box
         sx={{
           position: "relative",
@@ -163,19 +193,13 @@ export default function LiveCameraFeed({
             alignItems="center"
             justifyContent="center"
             spacing={1.5}
-            sx={{
-              px: 3,
-              textAlign: "center",
-            }}
+            sx={{ px: 3, textAlign: "center" }}
           >
             {status === "connecting" ? (
               <CircularProgress size={34} />
             ) : (
               <SignalWifiStatusbar4BarIcon
-                sx={{
-                  fontSize: 42,
-                  color: "#999",
-                }}
+                sx={{ fontSize: 42, color: "#999" }}
               />
             )}
 
@@ -186,15 +210,9 @@ export default function LiveCameraFeed({
             </Typography>
 
             {status === "disconnected" && (
-              <>
-                <Typography variant="body2" sx={{ color: "#bbb" }}>
-                  {error}
-                </Typography>
-
-                <Typography variant="caption" sx={{ color: "#bbb" }}>
-                  Retrying in 5 seconds... (Attempt {retryCount})
-                </Typography>
-              </>
+              <Typography variant="body2" sx={{ color: "#bbb" }}>
+                {error}
+              </Typography>
             )}
           </Stack>
         )}
@@ -205,27 +223,18 @@ export default function LiveCameraFeed({
         direction="row"
         alignItems="center"
         justifyContent="space-between"
-        spacing={1}
-        sx={{
-          px: 2,
-          py: 1.25,
-          flexWrap: "wrap",
-        }}
+        sx={{ px: 2, py: 1.25 }}
       >
         <Typography variant="caption" color="text.secondary">
           {status === "live"
             ? "Stream connected"
             : status === "connecting"
               ? "Establishing connection"
-              : "Waiting to reconnect"}
+              : "Check the camera or backend connection"}
         </Typography>
 
         <Typography variant="caption" color="text.secondary">
-          {status === "live"
-            ? "Video stream"
-            : status === "connecting"
-              ? "Connection in progress"
-              : `Retry attempt: ${retryCount}`}
+          {status === "live" ? "Video stream" : "No active stream"}
         </Typography>
       </Stack>
     </Paper>

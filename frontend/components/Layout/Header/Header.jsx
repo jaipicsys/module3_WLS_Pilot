@@ -14,6 +14,8 @@ import {
     Badge,
     TextField,
     InputAdornment,
+    ToggleButton,
+    ToggleButtonGroup,
 } from "@mui/material";
 import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
 import ArrowBackIosNewIcon from "@mui/icons-material/ArrowBackIosNew";
@@ -52,6 +54,8 @@ export default function Header({
     title,
     description,
     showBackButton = false,
+    mode: modeProp, // "live" | "recorded" when the page controls it (optional)
+    onModeChange, // called with "live" or "recorded"
 }) {
     const theme = useTheme();
     const isDarkMode = theme.palette.mode === "dark";
@@ -66,6 +70,8 @@ export default function Header({
     const [line, setLine] = useState("All Lines");
     const [date, setDate] = useState("2026-09-21");
     const [shift, setShift] = useState("Day (6 AM - 2 PM)");
+    const [modeState, setModeState] = useState("live");
+    const mode = modeProp ?? modeState; // pages that pass no mode keep working
 
     const user = useSelector((state) => state.auth.user);
 
@@ -93,6 +99,12 @@ export default function Header({
     const handleMenu = (event) => setAnchorEl(event.currentTarget);
     const handleClose = () => setAnchorEl(null);
     const handleBack = () => router.back();
+
+    const handleMode = (_event, next) => {
+        if (!next) return; // keep one option always selected
+        setModeState(next);
+        if (onModeChange) onModeChange(next);
+    };
 
     const handleLogout = async () => {
         try {
@@ -131,6 +143,7 @@ export default function Header({
         menuBg: isDarkMode ? "#1a1a2a" : "#ffffff",
         menuText: isDarkMode ? "#d8d8e8" : "#1a1a2e",
         menuHover: isDarkMode ? "#2a2a3a" : "#f0f0f8",
+        toggleSelectedBg: isDarkMode ? "#0f8a6a" : "#016b51",
         menuShadow: isDarkMode
             ? "0 4px 20px rgba(0,0,0,0.5)"
             : "0 4px 20px rgba(0,0,0,0.12)",
@@ -168,6 +181,27 @@ export default function Header({
             px: 1.25,
             fontSize: "13px",
             fontWeight: 600,
+        },
+    };
+
+    const modeToggleSx = {
+        height: 40,
+        bgcolor: colors.fieldBg,
+        borderRadius: "8px",
+        overflow: "hidden",
+        "& .MuiToggleButton-root": {
+            border: "none",
+            borderRadius: 0,
+            px: 1.75,
+            textTransform: "none",
+            fontSize: "13px",
+            fontWeight: 600,
+            color: colors.fieldText,
+            "&.Mui-selected": {
+                bgcolor: colors.toggleSelectedBg,
+                color: "#ffffff",
+                "&:hover": { bgcolor: colors.toggleSelectedBg },
+            },
         },
     };
 
@@ -287,6 +321,21 @@ export default function Header({
                             mt:1
                         }}
                     >
+                        {/* MODE: Live / Recorded */}
+                        <Box sx={{ position: "relative" }}>
+                            <Typography sx={filterLabelSx}>Mode</Typography>
+                            <ToggleButtonGroup
+                                exclusive
+                                size="small"
+                                value={mode}
+                                onChange={handleMode}
+                                sx={modeToggleSx}
+                            >
+                                <ToggleButton value="live">Live</ToggleButton>
+                                <ToggleButton value="recorded">Recorded</ToggleButton>
+                            </ToggleButtonGroup>
+                        </Box>
+
                         {/* PLANT */}
                         <FormControl
                             size="small"

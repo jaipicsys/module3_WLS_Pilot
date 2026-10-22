@@ -32,14 +32,19 @@ const changeOf = (card) =>
 
 const Overview = () => {
   const [kpi, setKpi] = useState(null);
+  const [mode, setMode] = useState("live"); // "live" | "recorded", set by the header
 
-  /* Fetch KPI cards immediately, then poll every 10 seconds */
+  /* Fetch KPI cards immediately, then poll every 10 seconds (restarts on mode change) */
   useEffect(() => {
     let intervalId;
+    let active = true;
+
+    setKpi(null); // don't show the other mode's numbers while loading
 
     const loadData = async () => {
       try {
-        setKpi(await getKpiCards());
+        const data = await getKpiCards(mode);
+        if (active) setKpi(data);
       } catch (err) {
         console.error("Failed to fetch KPI cards:", err);
       }
@@ -48,8 +53,11 @@ const Overview = () => {
     loadData();
     intervalId = setInterval(loadData, 10000);
 
-    return () => clearInterval(intervalId);
-  }, []);
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+    };
+  }, [mode]);
 
   /* Map the API response onto the cards */
   const kpis = useMemo(() => {
@@ -100,6 +108,8 @@ const Overview = () => {
       <Header
         title="Plant Overview"
         description="Real-time visibility into towel packing operations, productivity and performance."
+        mode={mode}
+        onModeChange={setMode}
       />
 
       <Box sx={{ p: { xs: 1.5, md: 2.5 } }}>
@@ -113,7 +123,7 @@ const Overview = () => {
 
           {/* Row 2 — trend / distribution / live feed */}
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
-            <OutputTrend />
+            <OutputTrend mode={mode} />
           </Grid>
 
           {/* <Grid size={{ xs: 12, md: 6, lg: 3 }}>
@@ -125,20 +135,20 @@ const Overview = () => {
           </Grid> */}
 
           <Grid size={{ xs: 12, md: 12, lg: 6 }}>
-            <LiveCameraFeed />
+            <LiveCameraFeed mode={mode} />
           </Grid>
 
           {/* Row 3 — product / operators / loss */}
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
-            <OutputByProduct />
+            <OutputByProduct mode={mode} />
           </Grid>
 
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
-            <TopOperators />
+            <TopOperators mode={mode} />
           </Grid>
 
           <Grid size={{ xs: 12, md: 12, lg: 6 }}>
-            <LossBreakdown />
+            <LossBreakdown mode={mode} />
           </Grid>
 
           {/* Row 4 — events / alerts */}
