@@ -26,8 +26,8 @@ import Header from "../../Layout/Header/Header";
 const ALERTS = [
   {
     id: "ALERT-1",
-    time: "2026-10-22T09:14:32",
-    reason: "Towel Count Correction",
+    time: new Date().toISOString(),
+    reason: "Rework",
     description:
       "Incorrect towel count reported during box packing. Additional towels are added or excess towels are removed to correct the count.",
     severity: "medium",
