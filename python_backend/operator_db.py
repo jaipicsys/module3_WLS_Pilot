@@ -9,6 +9,13 @@ COLUMNS = [
 ]
 
 
+def _ts(moment):
+    """datetime (or 'YYYY-MM-DD HH:MM:SS' string) -> 'YYYY-MM-DD HH:MM:SS'."""
+    if isinstance(moment, str):
+        return moment
+    return moment.isoformat(sep=" ", timespec="seconds")
+
+
 def open_segment(row):
     """Insert a new status row with empty end_time. Returns its id."""
     conn = get_db_connection()
@@ -37,25 +44,62 @@ def close_segment(segment_id, end_time, duration_seconds):
         conn.close()
 
 
-def close_stale_segments():
+def close_open_segments(cam_id, closed_at=None):
     """
-    Run once at startup. Rows left open by a crash or restart
-    get closed at the current time, so reports don't see NULL end_time.
+    Close every still-open row of one camera at `closed_at` (default: now).
+    Call it with the time of the LAST PROCESSED FRAME when the stream ends or the
+    camera disconnects. Returns how many rows were closed.
     """
-    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    closed_at = _ts(closed_at or datetime.now())
     conn = get_db_connection()
     try:
         cur = conn.execute(
             """
             UPDATE operator_status
-            SET end_time = ?,
-                durations = ROUND((julianday(?) - julianday(start_time)) * 86400, 2)
-            WHERE end_time IS NULL
+            SET end_time  = MAX(?, start_time),
+                durations = ROUND((julianday(MAX(?, start_time)) - julianday(start_time)) * 86400, 2)
+            WHERE cam_id = ? AND end_time IS NULL
             """,
-            (now, now),
+            (closed_at, closed_at, cam_id),
         )
         conn.commit()
-        if cur.rowcount:
-            print(f"[DB] Closed {cur.rowcount} stale operator_status row(s).")
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def close_stale_segments():
+    """
+    Run once at startup. Rows left open by a crash or restart are closed at the
+    last time that camera wrote anything (its latest end_time/start_time), not at
+    the current time, so the gap while the backend was down is not counted.
+    """
+    conn = get_db_connection()
+    try:
+        total = 0
+        cams = conn.execute(
+            """
+            SELECT cam_id, MAX(COALESCE(end_time, start_time)) AS last_seen
+            FROM operator_status
+            GROUP BY cam_id
+            HAVING SUM(end_time IS NULL) > 0
+            """
+        ).fetchall()
+
+        for cam in cams:
+            cur = conn.execute(
+                """
+                UPDATE operator_status
+                SET end_time  = ?,
+                    durations = ROUND((julianday(?) - julianday(start_time)) * 86400, 2)
+                WHERE cam_id IS ? AND end_time IS NULL
+                """,
+                (cam["last_seen"], cam["last_seen"], cam["cam_id"]),
+            )
+            total += cur.rowcount
+
+        conn.commit()
+        if total:
+            print(f"[DB] Closed {total} stale operator_status row(s).")
     finally:
         conn.close()
