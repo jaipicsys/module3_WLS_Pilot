@@ -1,5 +1,8 @@
-from flask import Blueprint, jsonify
-
+import base64
+ 
+from flask import Blueprint, Response, jsonify, stream_with_context
+ 
+from frame_hub import hub
 import operators_service
 import output_service
 import overview_service
@@ -40,3 +43,45 @@ def top_operators():
 def loss_breakdown():
     """Loss Breakdown chart: idle and away time grouped by reason."""
     return jsonify(operators_service.get_loss_breakdown()), 200
+
+# ---------------- Live camera feed ----------------
+ 
+@api_bp.route("/cameras", methods=["GET"])
+def cameras():
+    """Configured cameras and whether each is delivering frames: [{id, online}]."""
+    return jsonify({"cameras": hub.cameras()}), 200
+ 
+ 
+@api_bp.route("/camera/<cam_id>/stream", methods=["GET"])
+def camera_stream(cam_id):
+    """Live MJPEG feed. Use it directly as <img src=".../api/camera/<id>/stream">."""
+    if not hub.known(cam_id):
+        return jsonify({"error": f"Unknown camera '{cam_id}'"}), 404
+    return Response(
+        stream_with_context(hub.stream(cam_id)),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+ 
+ 
+@api_bp.route("/camera/<cam_id>/snapshot", methods=["GET"])
+def camera_snapshot(cam_id):
+    """One JPEG of the camera right now."""
+    if not hub.known(cam_id):
+        return jsonify({"error": f"Unknown camera '{cam_id}'"}), 404
+    jpeg = hub.snapshot(cam_id)
+    if jpeg is None:
+        return jsonify({"error": "No frame available yet"}), 503
+    return Response(jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+ 
+ 
+@api_bp.route("/camera_frame/<cam_id>", methods=["GET"])
+def camera_frame(cam_id):
+    """Same snapshot as base64 JSON, for the existing fetchCameraFrame() in api.js."""
+    if not hub.known(cam_id):
+        return jsonify({"error": f"Unknown camera '{cam_id}'"}), 404
+    jpeg = hub.snapshot(cam_id)
+    if jpeg is None:
+        return jsonify({"error": "No frame available yet"}), 503
+    return jsonify({"image": base64.b64encode(jpeg).decode("ascii")}), 200
+ 

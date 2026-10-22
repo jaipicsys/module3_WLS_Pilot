@@ -13,11 +13,16 @@ import cv2
 
 import operator_db
 from config_utils import CONFIG
+from frame_hub import hub
 from logics import FrameLogic, OperatorState, _cam_number
 from video_recorder import VideoRecorder
 
 RETRY_SECONDS = CONFIG.get("rtsp_retry_seconds", 3)
 RECORD_VIDEO = CONFIG.get("record_video", False)
+
+# Optional "live_feed" block in config.json: {"fps": 10, "width": 960, "quality": 70}
+LIVE_FEED = CONFIG.get("live_feed", {})
+hub.configure(LIVE_FEED.get("fps"), LIVE_FEED.get("width"), LIVE_FEED.get("quality"))
 
 
 class CameraWorker:
@@ -40,6 +45,8 @@ class CameraWorker:
 
         # Time of the last frame that was processed (None = none since last close).
         self.last_frame_time = None
+
+        hub.register(camera_id)
 
         # Recording needs the annotations drawn, even without a display.
         self.recorder = None
@@ -129,6 +136,12 @@ class CameraWorker:
                             )
                             self._close_open_rows()
                             break  # back to the outer loop and reconnect
+
+                        # Live feed for the browser: the RAW frame, taken before
+                        # processing draws anything (encodes only while watched).
+                        hub.beat(self.camera_id)
+                        if hub.wants(self.camera_id):
+                            hub.publish(self.camera_id, frame)
 
                         output_frame = self.logic.process(frame)
                         self.last_frame_time = datetime.now()
