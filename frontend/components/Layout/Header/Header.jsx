@@ -72,23 +72,23 @@ export default function Header({
     /*
      * Fetch alerts count
      */
-    useEffect(() => {
-        let intervalId;
+    // useEffect(() => {
+    //     let intervalId;
 
-        const loadAlerts = async () => {
-            try {
-                const response = await fetchAlerts();
-                setAlertCount(response.total);
-            } catch (err) {
-                console.error("Failed to fetch alerts:", err);
-            }
-        };
+    //     const loadAlerts = async () => {
+    //         try {
+    //             const response = await fetchAlerts();
+    //             setAlertCount(response.total);
+    //         } catch (err) {
+    //             console.error("Failed to fetch alerts:", err);
+    //         }
+    //     };
 
-        loadAlerts();
-        intervalId = setInterval(loadAlerts, 10000);
+    //     loadAlerts();
+    //     intervalId = setInterval(loadAlerts, 10000);
 
-        return () => clearInterval(intervalId);
-    }, []);
+    //     return () => clearInterval(intervalId);
+    // }, []);
 
     const handleMenu = (event) => setAnchorEl(event.currentTarget);
     const handleClose = () => setAnchorEl(null);
@@ -387,7 +387,7 @@ export default function Header({
                         </FormControl>
 
                         {/* ALERT BELL */}
-                        {asPath !== "/alerts" && (
+                        {/* {asPath !== "/alerts" && (
                             <Box sx={bellShake}>
                                 <IconButton
                                     size="small"
@@ -440,7 +440,7 @@ export default function Header({
                                     </Badge>
                                 </IconButton>
                             </Box>
-                        )}
+                        )} */}
 
                         {/* USER CARD */}
                         <Card

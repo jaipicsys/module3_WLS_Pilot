@@ -95,23 +95,7 @@ const Overview = () => {
         trend: null,
         sub: "of available time",
         icon: <PauseCircleOutlineOutlined />,
-      },
-      {
-        label: "Efficiency",
-        value: d.efficiency ? `${d.efficiency.value_pct}%` : "—",
-        ...(d.efficiency ? change(d.efficiency.change_pct) : {}),
-        sub: "vs. previous shift",
-        icon: <GpsFixedOutlined />,
-      },
-      {
-        label: "SOP Adherence",
-        value: d.sop_adherence
-          ? `${d.sop_adherence.value_pct}%`
-          : "—",
-        ...(d.sop_adherence ? change(d.sop_adherence.change_pct) : {}),
-        sub: "of observed cycles",
-        icon: <ChecklistRtlIcon />,
-      },
+      }
     ];
   }, [kpi]);
 
@@ -162,7 +146,7 @@ const Overview = () => {
           {/* Row 1 — KPI cards */}
           {kpis.map((k) => (
             <Grid
-              size={{ xs: 12, sm: 6, md: 4, lg: 2 }}
+              size={{ xs: 12, sm: 6, md: 4, lg: 3 }}
               key={k.label}
             >
               <KpiCard {...k} />
@@ -170,28 +154,28 @@ const Overview = () => {
           ))}
 
           {/* Row 2 — trend / distribution / live feed */}
-          <Grid size={{ xs: 12, md: 6, lg: 5 }}>
+          <Grid size={{ xs: 12, md: 6, lg: 6 }}>
             <OutputTrend />
           </Grid>
 
-          <Grid size={{ xs: 12, md: 6, lg: 3 }}>
+          {/* <Grid size={{ xs: 12, md: 6, lg: 3 }}>
             <TimeDistribution
               data={timeRows}
               centerValue={availableTime}
               centerLabel="Available Time"
             />
-          </Grid>
+          </Grid> */}
 
-          <Grid size={{ xs: 12, md: 12, lg: 4 }}>
+          {/* <Grid size={{ xs: 12, md: 12, lg: 4 }}>
             <LiveFeed />
-          </Grid>
+          </Grid> */}
 
           {/* Row 3 — product / operators / loss */}
-          <Grid size={{ xs: 12, md: 6, lg: 3 }}>
+          <Grid size={{ xs: 12, md: 6, lg: 6 }}>
             <OutputByProduct />
           </Grid>
 
-          <Grid size={{ xs: 12, md: 6, lg: 5 }}>
+          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
             <TopOperators />
           </Grid>
 
@@ -200,11 +184,11 @@ const Overview = () => {
           </Grid>
 
           {/* Row 4 — events / alerts */}
-          <Grid size={{ xs: 12, lg: 7 }}>
+          {/* <Grid size={{ xs: 12, lg: 7 }}>
             <RecentEvents />
-          </Grid>
+          </Grid> */}
 
-          <Grid size={{ xs: 12, lg: 5 }}>
+          <Grid size={{ xs: 12, lg: 4 }}>
             <AlertsNotifications />
           </Grid>
         </Grid>

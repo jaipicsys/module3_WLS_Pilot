@@ -42,8 +42,9 @@ export default function TopOperators({ data = DEFAULT_DATA, onViewAll }) {
                     <TableRow>
                         <TableCell sx={{ ...headCell, width: 32 }}>#</TableCell>
                         <TableCell sx={headCell}>Operator ID</TableCell>
-                        <TableCell sx={headCell} align="right">Output</TableCell>
-                        <TableCell sx={headCell} align="right">Efficiency</TableCell>
+                        <TableCell sx={headCell} align="right">Active Time</TableCell>
+                        <TableCell sx={headCell} align="right">Idle Time</TableCell>
+                        <TableCell sx={headCell} align="right">Away Time</TableCell>
                         <TableCell sx={headCell} align="right">Utilization</TableCell>
                     </TableRow>
                 </TableHead>

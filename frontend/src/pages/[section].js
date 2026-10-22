@@ -7,6 +7,7 @@ import Stations from "../../components/Section/Stations/Stations";
 import Operators from "../../components/Section/Operators/Operators";
 import Sopcompliance from "../../components/Section/Sopcompliance/Sopcompliance";
 import Production from "../../components/Section/Production/Production";
+import Alerts from "../../components/Section/Alerts/Alerts";
 
 const SectionPage = () => {
   const router = useRouter();
@@ -22,6 +23,10 @@ const SectionPage = () => {
       break;
     case "operator":
       Component = Operators;
+      allowedRoles = [0, 1, 2];
+      break;
+    case "alerts":
+      Component = Alerts;
       allowedRoles = [0, 1, 2];
       break;
     case "stations":

@@ -106,13 +106,13 @@ export default function KpiCard({
                         </Box>
                     )}
 
-                    {sub && (
+                    {/* {sub && (
                         <Typography
                             sx={{ fontSize: 12, color: c.muted, mt: 0.25 }}
                         >
                             {sub}
                         </Typography>
-                    )}
+                    )} */}
                 </Box>
             )}
         </Card>
