@@ -1,24 +1,54 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Typography } from "@mui/material";
 import Panel from "../Panel/Panel";
 import useDashboardColors, { barShades } from "../Tokens/Tokens";
+import { getOutputByProduct } from "../../../../utils/api";
 
-const DEFAULT_DATA = [
-    { label: "Towel – Standard", value: 520 },
-    { label: "Towel – Premium", value: 310 },
-    { label: "Hand Towel", value: 198 },
-    { label: "Bath Towel", value: 150 },
-    { label: "Others", value: 70 },
-];
-
-export default function OutputByProduct({ data = DEFAULT_DATA }) {
+/*
+ * Output per product. Loads from the API and refreshes every 10 seconds.
+ * Pass `data` ([{ label, value }]) to override the API.
+ */
+export default function OutputByProduct({ data }) {
     const c = useDashboardColors();
-    const max = Math.max(...data.map((d) => d.value), 1);
+    const [rows, setRows] = useState([]);
+
+    useEffect(() => {
+        if (data) return undefined;
+
+        let active = true;
+
+        const load = async () => {
+            try {
+                const res = await getOutputByProduct();
+                if (active) {
+                    setRows(
+                        (res.products || []).map((p) => ({
+                            label: p.name,
+                            value: p.value,
+                        }))
+                    );
+                }
+            } catch (err) {
+                console.error("Failed to fetch output by product:", err);
+            }
+        };
+
+        load();
+        const intervalId = setInterval(load, 10000);
+
+        return () => {
+            active = false;
+            clearInterval(intervalId);
+        };
+    }, [data]);
+
+    const list = data ?? rows;
+    const max = Math.max(...list.map((d) => d.value), 1);
 
     return (
         <Panel title="Output by Product">
             <Box sx={{ display: "flex", flexDirection: "column", gap: 1.75 }}>
-                {data.map((row, i) => {
+                {list.map((row, i) => {
                     const isOther = row.label.toLowerCase().startsWith("other");
                     const color = isOther
                         ? c.gray

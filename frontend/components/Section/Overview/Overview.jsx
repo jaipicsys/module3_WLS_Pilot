@@ -8,7 +8,7 @@ import ChecklistRtlIcon from "@mui/icons-material/ChecklistRtl";
 import { TbPackageExport } from "react-icons/tb";
 
 import Header from "../../Layout/Header/Header";
-import { getKpiCards, getTimeDistribution } from "../../../utils/api";
+import { getKpiCards } from "../../../utils/api";
 import KpiCard from "./Kpicard/Kpicard";
 import OutputTrend from "./Outputtrend/Outputtrend";
 import TimeDistribution from "./Timedistribution/Timedistribution";
@@ -25,25 +25,22 @@ const change = (pct) => ({
   trend: pct > 0 ? "up" : pct < 0 ? "down" : null,
 });
 
+/* Only show a change when the API actually sends one */
+const changeOf = (card) =>
+  card && card.change_pct != null ? change(card.change_pct) : {};
+
 const Overview = () => {
   const [kpi, setKpi] = useState(null);
-  const [timeDistribution, setTimeDistribution] = useState(null);
 
-  /* Fetch KPI cards and time distribution immediately, then poll every 10 seconds */
+  /* Fetch KPI cards immediately, then poll every 10 seconds */
   useEffect(() => {
     let intervalId;
 
     const loadData = async () => {
       try {
-        const [kpiData, timeData] = await Promise.all([
-          getKpiCards(),
-          getTimeDistribution(),
-        ]);
-
-        setKpi(kpiData);
-        setTimeDistribution(timeData);
+        setKpi(await getKpiCards());
       } catch (err) {
-        console.error("Failed to fetch overview data:", err);
+        console.error("Failed to fetch KPI cards:", err);
       }
     };
 
@@ -63,7 +60,7 @@ const Overview = () => {
         value: d.total_output
           ? Number(d.total_output.value).toLocaleString()
           : "—",
-        ...(d.total_output ? change(d.total_output.change_pct) : {}),
+        ...changeOf(d.total_output),
         sub: "vs. previous shift",
         icon: <Inventory2Outlined />,
       },
@@ -72,7 +69,7 @@ const Overview = () => {
         value: d.output_per_hour
           ? Number(d.output_per_hour.value).toLocaleString()
           : "—",
-        ...(d.output_per_hour ? change(d.output_per_hour.change_pct) : {}),
+        ...changeOf(d.output_per_hour),
         sub: "units/hour",
         icon: <TbPackageExport fontSize={24} />,
       },
@@ -89,50 +86,13 @@ const Overview = () => {
       {
         label: "Idle / Waiting Time",
         value: d.idle_time?.display ?? "—",
-        delta: d.idle_time
-          ? `${d.idle_time.pct_of_available}%`
-          : undefined,
+        delta: d.idle_time ? `${d.idle_time.pct_of_available}%` : undefined,
         trend: null,
         sub: "of available time",
         icon: <PauseCircleOutlineOutlined />,
-      }
+      },
     ];
   }, [kpi]);
-
-  /* Convert API response into TimeDistribution rows */
-  const timeRows = useMemo(() => {
-    if (!timeDistribution?.total?.seconds) {
-      return undefined;
-    }
-
-    const total = Number(timeDistribution.total.seconds);
-
-    const getPct = (seconds) =>
-      Number(((Number(seconds || 0) / total) * 100).toFixed(1));
-
-    return [
-      {
-        label: "Productive",
-        value: Number(timeDistribution.productive?.seconds || 0),
-        amount: timeDistribution.productive?.display || "—",
-        pct: getPct(timeDistribution.productive?.seconds),
-      },
-      {
-        label: "Idle / Waiting",
-        value: Number(timeDistribution.idle?.seconds || 0),
-        amount: timeDistribution.idle?.display || "—",
-        pct: getPct(timeDistribution.idle?.seconds),
-      },
-      {
-        label: "Away",
-        value: Number(timeDistribution.away?.seconds || 0),
-        amount: timeDistribution.away?.display || "—",
-        pct: getPct(timeDistribution.away?.seconds),
-      },
-    ];
-  }, [timeDistribution]);
-
-  const availableTime = timeDistribution?.total?.display || "—";
 
   return (
     <>
@@ -145,10 +105,7 @@ const Overview = () => {
         <Grid container spacing={2}>
           {/* Row 1 — KPI cards */}
           {kpis.map((k) => (
-            <Grid
-              size={{ xs: 12, sm: 6, md: 4, lg: 3 }}
-              key={k.label}
-            >
+            <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={k.label}>
               <KpiCard {...k} />
             </Grid>
           ))}

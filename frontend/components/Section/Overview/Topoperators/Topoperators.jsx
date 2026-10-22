@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
     Table,
     TableHead,
@@ -9,17 +9,50 @@ import {
 } from "@mui/material";
 import Panel from "../Panel/Panel";
 import useDashboardColors from "../Tokens/Tokens";
+import { getTopOperators } from "../../../../utils/api";
 
-const DEFAULT_DATA = [
-    { id: "OP-104", output: 220, eff: "94%", util: "86%" },
-    { id: "OP-087", output: 198, eff: "91%", util: "82%" },
-    { id: "OP-118", output: 186, eff: "89%", util: "78%" },
-    { id: "OP-132", output: 162, eff: "87%", util: "76%" },
-    { id: "OP-095", output: 148, eff: "84%", util: "72%" },
-];
-
-export default function TopOperators({ data = DEFAULT_DATA, onViewAll }) {
+/*
+ * Loads from the API and refreshes every 10 seconds.
+ * Pass `data` ([{ id, active, idle, away, util }]) to override the API.
+ */
+export default function TopOperators({ data, onViewAll }) {
     const c = useDashboardColors();
+    const [rows, setRows] = useState([]);
+
+    useEffect(() => {
+        if (data) return undefined;
+
+        let active = true;
+
+        const load = async () => {
+            try {
+                const res = await getTopOperators();
+                if (active) {
+                    setRows(
+                        (res.operators || []).map((o) => ({
+                            id: o.operator_id,
+                            active: o.active_display,
+                            idle: o.idle_display,
+                            away: o.away_display,
+                            util: `${Math.round(o.utilization_pct)}%`,
+                        }))
+                    );
+                }
+            } catch (err) {
+                console.error("Failed to fetch top operators:", err);
+            }
+        };
+
+        load();
+        const intervalId = setInterval(load, 10000);
+
+        return () => {
+            active = false;
+            clearInterval(intervalId);
+        };
+    }, [data]);
+
+    const list = data ?? rows;
 
     const headCell = {
         fontSize: 11.5,
@@ -49,7 +82,7 @@ export default function TopOperators({ data = DEFAULT_DATA, onViewAll }) {
                     </TableRow>
                 </TableHead>
                 <TableBody>
-                    {data.map((row, i) => (
+                    {list.map((row, i) => (
                         <TableRow key={row.id} hover>
                             <TableCell sx={{ ...bodyCell, color: c.muted }}>
                                 {i + 1}
@@ -58,10 +91,13 @@ export default function TopOperators({ data = DEFAULT_DATA, onViewAll }) {
                                 {row.id}
                             </TableCell>
                             <TableCell sx={bodyCell} align="right">
-                                {row.output}
+                                {row.active}
                             </TableCell>
                             <TableCell sx={bodyCell} align="right">
-                                {row.eff}
+                                {row.idle}
+                            </TableCell>
+                            <TableCell sx={bodyCell} align="right">
+                                {row.away}
                             </TableCell>
                             <TableCell sx={bodyCell} align="right">
                                 {row.util}

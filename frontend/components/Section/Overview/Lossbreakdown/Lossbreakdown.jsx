@@ -1,22 +1,58 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Typography } from "@mui/material";
 import Panel from "../Panel/Panel";
 import useDashboardColors from "../Tokens/Tokens";
+import { getLossBreakdown } from "../../../../utils/api";
 
 /*
- * rows: { label, pct, amount }  (pct drives bar width + shown in the label)
+ * rows: { label, pct, amount, color }  (pct drives bar width + shown in the label)
+ * Loads idle + away reasons from the API and refreshes every 10 seconds.
+ * Pass `data` to override the API.
  */
-const buildDefault = (c) => [
-    { label: "Material Waiting", pct: 41, amount: "32m", color: "#f0563a" },
-    { label: "QC Waiting", pct: 23, amount: "18m", color: c.orange },
-    { label: "Changeover", pct: 21, amount: "16m", color: "#f47a4e" },
-    { label: "Personal Break", pct: 10, amount: "8m", color: "#f89b78" },
-    { label: "Others", pct: 5, amount: "4m", color: c.gray },
-];
-
 export default function LossBreakdown({ data }) {
     const c = useDashboardColors();
-    const rows = data || buildDefault(c);
+    const [items, setItems] = useState([]);
+
+    useEffect(() => {
+        if (data) return undefined;
+
+        let active = true;
+
+        const load = async () => {
+            try {
+                const res = await getLossBreakdown();
+                if (active) {
+                    setItems(
+                        (res.items || []).map((item) => ({
+                            label: item.label,
+                            pct: Math.round(item.pct),
+                            amount: item.display,
+                        }))
+                    );
+                }
+            } catch (err) {
+                console.error("Failed to fetch loss breakdown:", err);
+            }
+        };
+
+        load();
+        const intervalId = setInterval(load, 10000);
+
+        return () => {
+            active = false;
+            clearInterval(intervalId);
+        };
+    }, [data]);
+
+    const palette = ["#f0563a", c.orange, "#f47a4e", "#f89b78"];
+    const rows =
+        data ||
+        items.map((row, i) => ({
+            ...row,
+            color: row.label.toLowerCase().startsWith("other")
+                ? c.gray
+                : palette[Math.min(i, palette.length - 1)],
+        }));
     const max = Math.max(...rows.map((r) => r.pct), 1);
 
     return (
@@ -29,9 +65,10 @@ export default function LossBreakdown({ data }) {
                     >
                         <Typography
                             sx={{
-                                width: 100,
+                                width: 130,
                                 flexShrink: 0,
                                 fontSize: 12.5,
+                                lineHeight: 1.25,
                                 color: c.text,
                             }}
                         >
@@ -60,12 +97,13 @@ export default function LossBreakdown({ data }) {
 
                         <Typography
                             sx={{
-                                width: 78,
+                                width: 100,
                                 flexShrink: 0,
                                 textAlign: "right",
                                 fontSize: 12,
                                 fontWeight: 600,
                                 color: c.muted,
+                                whiteSpace: "nowrap",
                             }}
                         >
                             {row.amount} ({row.pct}%)

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Typography } from "@mui/material";
 import {
     ComposedChart,
@@ -12,22 +12,7 @@ import {
 } from "recharts";
 import Panel from "../Panel/Panel";
 import useDashboardColors from "../Tokens/Tokens";
-
-const DEFAULT_DATA = [
-    { time: "6 AM", output: 95, target: 110 },
-    { time: "", output: 78, target: 112 },
-    { time: "", output: 120, target: 115 },
-    { time: "8 AM", output: 105, target: 118 },
-    { time: "", output: 132, target: 120 },
-    { time: "", output: 92, target: 122 },
-    { time: "10 AM", output: 118, target: 125 },
-    { time: "", output: 140, target: 128 },
-    { time: "", output: 110, target: 130 },
-    { time: "12 PM", output: 150, target: 132 },
-    { time: "", output: 128, target: 134 },
-    { time: "", output: 158, target: 136 },
-    { time: "2 PM", output: 142, target: 138 },
-];
+import { getOutputTrend } from "../../../../utils/api";
 
 function LegendDot({ color, dashed, label, c }) {
     return (
@@ -54,8 +39,49 @@ function LegendDot({ color, dashed, label, c }) {
     );
 }
 
-export default function OutputTrend({ data = DEFAULT_DATA, height = 300 }) {
+/*
+ * Output per 5 minutes. Loads from the API and refreshes every 10 seconds.
+ * Pass `data` ([{ time, output, target }]) to override the API.
+ */
+export default function OutputTrend({ data, height = 300 }) {
     const c = useDashboardColors();
+    const [series, setSeries] = useState([]);
+
+    useEffect(() => {
+        if (data) return undefined;
+
+        let active = true;
+
+        const load = async () => {
+            try {
+                const res = await getOutputTrend();
+                if (active) {
+                    setSeries(
+                        (res.series || []).map((p) => ({
+                            time: p.label,
+                            output: p.output,
+                            target: p.target,
+                        }))
+                    );
+                }
+            } catch (err) {
+                console.error("Failed to fetch output trend:", err);
+            }
+        };
+
+        load();
+        const intervalId = setInterval(load, 10000);
+
+        return () => {
+            active = false;
+            clearInterval(intervalId);
+        };
+    }, [data]);
+
+    const chartData = data ?? series;
+
+    // Show every label for short ranges; thin them out when there are many bars.
+    const tickInterval = Math.max(0, Math.ceil(chartData.length / 8) - 1);
 
     return (
         <Panel
@@ -70,7 +96,7 @@ export default function OutputTrend({ data = DEFAULT_DATA, height = 300 }) {
         >
             <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
-                    data={data}
+                    data={chartData}
                     margin={{ top: 8, right: 8, left: -18, bottom: 0 }}
                 >
                     <CartesianGrid
@@ -83,12 +109,13 @@ export default function OutputTrend({ data = DEFAULT_DATA, height = 300 }) {
                         tickLine={false}
                         axisLine={{ stroke: c.track }}
                         tick={{ fontSize: 11, fill: c.muted }}
-                        interval={0}
+                        interval={tickInterval}
                     />
                     <YAxis
                         tickLine={false}
                         axisLine={false}
                         tick={{ fontSize: 11, fill: c.muted }}
+                        allowDecimals={false}
                         label={{
                             value: "Units",
                             angle: -90,

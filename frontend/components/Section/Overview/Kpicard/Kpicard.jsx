@@ -82,7 +82,7 @@ export default function KpiCard({
                 {value}
             </Typography>
 
-            {(delta || sub) && (
+            {/* {(delta || sub) && (
                 <Box sx={{ mt: 1 }}>
                     {delta && (
                         <Box
@@ -106,15 +106,15 @@ export default function KpiCard({
                         </Box>
                     )}
 
-                    {/* {sub && (
+                    {sub && (
                         <Typography
                             sx={{ fontSize: 12, color: c.muted, mt: 0.25 }}
                         >
                             {sub}
                         </Typography>
-                    )} */}
+                    )}
                 </Box>
-            )}
+            )} */}
         </Card>
     );
 }
