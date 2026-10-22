@@ -31,6 +31,12 @@ TIME_COLUMN_CANDIDATES = (
 # this recently; otherwise it stops at the last time anything was seen.
 LIVE_GRACE_SECONDS = 120
 
+# What Output / Hour is divided by:
+#   "monitored" = time the cameras were tracking operators (first to last operator
+#                 activity), so a 30-minute video counts as 30 minutes.
+#   "units"     = time from the first unit to the last unit.
+OUTPUT_PER_HOUR_BASIS = "monitored"
+
 PRODUCTIVE_STATUSES = ("active_work",)
 IDLE_STATUSES = ("idle",)
 AWAY_STATUSES = ("away",)
@@ -223,26 +229,29 @@ def get_kpi_cards():
     finally:
         conn.close()
 
-    # Output / hour: total output over the time units were being produced
-    # (first to last unit, per day so overnight gaps don't count). If there is
-    # no per-unit time (just one count), use the operators' activity instead.
+    # Output / hour = total output / hours observed, counted per day so the
+    # night between days does not count.
     def span_seconds(spans):
         return sum((last - first).total_seconds() for first, last in spans.values())
 
-    observed = span_seconds(output["day_spans"]) if output else 0
-    if observed < 60:
-        spans = {}
-        for source in (status, output):
-            for day, (first, last) in (source["day_spans"] if source else {}).items():
-                span = spans.setdefault(day, [first, last])
-                span[0] = min(span[0], first)
-                span[1] = max(span[1], last)
-        observed = span_seconds(spans)
+    merged = {}
+    for source in (status, output):
+        for day, (first, last) in (source["day_spans"] if source else {}).items():
+            span = merged.setdefault(day, [first, last])
+            span[0] = min(span[0], first)
+            span[1] = max(span[1], last)
+
+    if OUTPUT_PER_HOUR_BASIS == "monitored":
+        observed = span_seconds(merged)
+    else:
+        observed = span_seconds(output["day_spans"]) if output else 0
+        if observed < 60:
+            observed = span_seconds(merged)
 
     total_output = output["total"] if output else None
     output_per_hour = None
     if total_output is not None and observed >= 60:
-        output_per_hour = round(total_output / (observed / 3600), 1)
+        output_per_hour = round(total_output / (observed / 3600))  # whole units/hour
 
     productive_time = idle_time = None
     if status:
