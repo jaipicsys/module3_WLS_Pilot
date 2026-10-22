@@ -4,6 +4,10 @@ import sqlite3
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DATA_DB = os.path.join(BASE_DIR, "data.db")
+# The saved run used by recorded mode (read-only). Change the name here, or set
+# the RECORDED_DB_FILE environment variable. It must sit next to data.db.
+RECORDED_DB_FILE = os.environ.get("RECORDED_DB_FILE", "oct22_04_31.db")
+RECORDED_DB = os.path.join(BASE_DIR, RECORDED_DB_FILE)
 AUTH_DB = os.path.join(BASE_DIR, "auth.db")
 
 DEFAULT_PLANT = "Unit 1 Textile"
@@ -11,9 +15,30 @@ DEFAULT_PLANT = "Unit 1 Textile"
 
 # ---------------- DATABASE CONNECTIONS ----------------
 
-def get_db_connection():
-    """Connection to data.db (production tables)."""
-    conn = sqlite3.connect(DATA_DB, timeout=30)
+MODES = ("live", "recorded")
+
+
+def recorded_available():
+    return os.path.exists(RECORDED_DB)
+
+
+def get_db_connection(mode="live"):
+    """
+    Connection to the production tables.
+      mode="live"     -> data.db (what the cameras are writing now)
+      mode="recorded" -> recorded.db, opened read-only (a saved run)
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+
+    if mode == "recorded":
+        if not recorded_available():
+            raise FileNotFoundError(f"{RECORDED_DB_FILE} not found")
+        conn = sqlite3.connect(RECORDED_DB, timeout=30)
+        conn.execute("PRAGMA query_only = ON")  # recorded data can never change
+    else:
+        conn = sqlite3.connect(DATA_DB, timeout=30)
+
     conn.row_factory = sqlite3.Row
     return conn
 

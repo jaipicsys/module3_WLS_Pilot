@@ -18,8 +18,8 @@ TOP_OPERATORS = None  # rows in the table: None = every operator, or set a numbe
 LOSS_ROWS = 5       # rows in the chart; extra reasons are grouped into "Others"
 
 
-def _load_segments():
-    conn = get_db_connection()
+def _load_segments(mode="live"):
+    conn = get_db_connection(mode)
     try:
         segments, _ = status_segments(conn, datetime.now().replace(microsecond=0))
     finally:
@@ -29,10 +29,10 @@ def _load_segments():
 
 # ---------------- Top Operators ----------------
 
-def get_top_operators():
+def get_top_operators(mode="live"):
     """Operators ranked by active time. Utilization = active / (active + idle + away)."""
     totals = {}
-    for seg in _load_segments():
+    for seg in _load_segments(mode):
         op = totals.setdefault(
             seg["operator_id"], {"active": 0.0, "idle": 0.0, "away": 0.0}
         )
@@ -65,10 +65,10 @@ def get_top_operators():
 
 # ---------------- Loss Breakdown ----------------
 
-def get_loss_breakdown():
+def get_loss_breakdown(mode="live"):
     """Idle and away time grouped by reason, biggest first."""
     by_reason = {}
-    for seg in _load_segments():
+    for seg in _load_segments(mode):
         if seg["status"] in IDLE_STATUSES:
             kind = "idle"
         elif seg["status"] in AWAY_STATUSES:

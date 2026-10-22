@@ -51,11 +51,11 @@ def _describe_tables(conn):
     return info
 
 
-def get_output_trend():
+def get_output_trend(mode="live"):
     """Units finished per 5 minutes, for the most recent day that has data."""
     empty = {"interval_minutes": BUCKET_MINUTES, "date": None, "series": []}
 
-    conn = get_db_connection()
+    conn = get_db_connection(mode)
     try:
         # One row per unit: a separate per-unit table if there is one, otherwise
         # unit_count itself (each row = units counted, stamped with updated_at).
@@ -113,9 +113,9 @@ def get_output_trend():
 
 # ---------------- Output by Product ----------------
 
-def get_output_by_product():
+def get_output_by_product(mode="live"):
     """Total units per product, biggest first, padded to PRODUCT_ROWS rows."""
-    conn = get_db_connection()
+    conn = get_db_connection(mode)
     try:
         counts = []
         source = unit_events_source(conn)

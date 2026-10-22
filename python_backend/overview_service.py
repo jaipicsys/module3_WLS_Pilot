@@ -98,25 +98,41 @@ def unit_events_source(conn):
 def status_segments(conn, now):
     """
     Every operator_status row with its length in seconds.
-    Returns (segments, live). A row that is still open counts up to "now" only
-    if the cameras wrote something recently; otherwise it stops at the last
-    time anything was seen.
+    Returns (segments, live).
+
+    A row with no end_time is the operator's last state when the video (or the
+    backend) stopped, so nobody wrote its end. It is counted from its start up to
+    the last time THAT CAMERA wrote anything - or up to "now" if the camera is
+    still writing (last write within LIVE_GRACE_SECONDS). The durations column is
+    not needed for these rows.
     """
     rows = conn.execute(
-        "SELECT operator_id, status, reasons, start_time, end_time, durations "
+        "SELECT cam_id, operator_id, status, reasons, start_time, end_time, durations "
         "FROM operator_status"
     ).fetchall()
     if not rows:
         return [], False
 
-    last_seen = max(_parse(r["end_time"] or r["start_time"]) for r in rows)
-    live = (now - last_seen).total_seconds() <= LIVE_GRACE_SECONDS
-    open_end = now if live else min(now, last_seen)
+    last_seen = {}
+    for r in rows:
+        moment = _parse(r["end_time"] or r["start_time"])
+        cam = r["cam_id"]
+        if cam not in last_seen or moment > last_seen[cam]:
+            last_seen[cam] = moment
+
+    live_by_cam = {
+        cam: (now - moment).total_seconds() <= LIVE_GRACE_SECONDS
+        for cam, moment in last_seen.items()
+    }
 
     segments = []
     for row in rows:
+        cam = row["cam_id"]
         start = _parse(row["start_time"])
-        end = _parse(row["end_time"]) if row["end_time"] else open_end
+        if row["end_time"]:
+            end = _parse(row["end_time"])
+        else:
+            end = now if live_by_cam[cam] else min(now, last_seen[cam])
         if end <= start:
             continue
 
@@ -133,7 +149,7 @@ def status_segments(conn, now):
             "end": end,
             "seconds": seconds,
         })
-    return segments, live
+    return segments, any(live_by_cam.values())
 
 
 def _status_time(conn, now):
@@ -219,10 +235,10 @@ def _count_output(conn):
 
 # ---------------- public ----------------
 
-def get_kpi_cards():
+def get_kpi_cards(mode="live"):
     now = datetime.now().replace(microsecond=0)
 
-    conn = get_db_connection()
+    conn = get_db_connection(mode)
     try:
         status = _status_time(conn, now)
         output = _events_output(conn) or _count_output(conn)
