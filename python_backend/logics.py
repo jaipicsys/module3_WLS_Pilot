@@ -21,7 +21,7 @@ ACTIVE = "active_work"
 IDLE = "idle"
 AWAY = "away"
 
-REASON_AWAY = "Operator not in ROI"
+REASON_AWAY = "Away"
 
 # COCO keypoints: left wrist, right wrist
 WRISTS = [9, 10]
@@ -49,17 +49,17 @@ LOGICS = {
     "wrist_on_towel": {
         "method": "_logic_wrist_on_towel",
         "needs_pose": True,
-        "idle_reason": "No towel or pose not detected",
+        "idle_reason": "Waiting for materials",
     },
     "wrist_on_towel_or_box": {
         "method": "_logic_wrist_on_towel_or_box",
         "needs_pose": True,
-        "idle_reason": "Wrist not on towel or box",
+        "idle_reason": "Waiting for materials",
     },
     "box_with_towel_overlap": {
         "method": "_logic_box_with_towel_overlap",
         "needs_pose": False,
-        "idle_reason": "No box with towel",
+        "idle_reason": "Others",
     },
     "always_active": {
         "method": "_logic_always_active",
