@@ -52,6 +52,13 @@ def fmt_duration(seconds):
     return f"{secs}s"
 
 
+def fmt_hours_minutes(seconds):
+    """Hours and minutes only, rounded to the nearest minute: 1427 -> '0h 24m'."""
+    minutes = int(round(seconds / 60))
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m"
+
+
 def _table_exists(conn, name):
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
@@ -244,7 +251,7 @@ def get_kpi_cards():
         def card(seconds):
             return {
                 "seconds": round(seconds, 1),
-                "display": fmt_duration(seconds),
+                "display": fmt_hours_minutes(seconds),
                 "pct_of_available": round(seconds / tracked * 100, 1) if tracked else 0,
             }
 
