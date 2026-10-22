@@ -1,42 +1,42 @@
 import React, { useEffect, useState } from "react";
 import { Box, Typography } from "@mui/material";
 import {
-    ComposedChart,
-    Bar,
-    Line,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip,
-    ResponsiveContainer,
+  ComposedChart,
+  Bar,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
 } from "recharts";
 import Panel from "../Panel/Panel";
 import useDashboardColors from "../Tokens/Tokens";
 import { getOutputTrend } from "../../../../utils/api";
 
 function LegendDot({ color, dashed, label, c }) {
-    return (
-        <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-            {dashed ? (
-                <Box
-                    sx={{
-                        width: 16,
-                        borderTop: `2px dashed ${color}`,
-                    }}
-                />
-            ) : (
-                <Box
-                    sx={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: "50%",
-                        bgcolor: color,
-                    }}
-                />
-            )}
-            <Typography sx={{ fontSize: 12, color: c.muted }}>{label}</Typography>
-        </Box>
-    );
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+      {dashed ? (
+        <Box
+          sx={{
+            width: 16,
+            borderTop: `2px dashed ${color}`,
+          }}
+        />
+      ) : (
+        <Box
+          sx={{
+            width: 9,
+            height: 9,
+            borderRadius: "50%",
+            bgcolor: color,
+          }}
+        />
+      )}
+      <Typography sx={{ fontSize: 12, color: c.muted }}>{label}</Typography>
+    </Box>
+  );
 }
 
 /*
@@ -44,114 +44,114 @@ function LegendDot({ color, dashed, label, c }) {
  * Pass `data` ([{ time, output, target }]) to override the API.
  */
 export default function OutputTrend({ data, height = 300 }) {
-    const c = useDashboardColors();
-    const [series, setSeries] = useState([]);
+  const c = useDashboardColors();
+  const [series, setSeries] = useState([]);
 
-    useEffect(() => {
-        if (data) return undefined;
+  useEffect(() => {
+    if (data) return undefined;
 
-        let active = true;
+    let active = true;
 
-        const load = async () => {
-            try {
-                const res = await getOutputTrend();
-                if (active) {
-                    setSeries(
-                        (res.series || []).map((p) => ({
-                            time: p.label,
-                            output: p.output,
-                            target: p.target,
-                        }))
-                    );
-                }
-            } catch (err) {
-                console.error("Failed to fetch output trend:", err);
-            }
-        };
+    const load = async () => {
+      try {
+        const res = await getOutputTrend();
+        if (active) {
+          setSeries(
+            (res.series || []).map((p) => ({
+              time: p.label,
+              output: p.output,
+              target: p.target,
+            })),
+          );
+        }
+      } catch (err) {
+        console.error("Failed to fetch output trend:", err);
+      }
+    };
 
-        load();
-        const intervalId = setInterval(load, 10000);
+    load();
+    const intervalId = setInterval(load, 10000);
 
-        return () => {
-            active = false;
-            clearInterval(intervalId);
-        };
-    }, [data]);
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+    };
+  }, [data]);
 
-    const chartData = data ?? series;
+  const chartData = data ?? series;
 
-    // Show every label for short ranges; thin them out when there are many bars.
-    const tickInterval = Math.max(0, Math.ceil(chartData.length / 8) - 1);
+  // Show every label for short ranges; thin them out when there are many bars.
+  const tickInterval = Math.max(0, Math.ceil(chartData.length / 8) - 1);
 
-    return (
-        <Panel
-            title="Output Trend"
-            headerRight={
-                <Box sx={{ display: "flex", gap: 2 }}>
-                    <LegendDot color={c.accent} label="Output" c={c} />
-                    <LegendDot color={c.muted} dashed label="Target" c={c} />
-                </Box>
-            }
-            sx={{ minHeight: height }}
+  return (
+    <Panel
+      title="Output Trend"
+      headerRight={
+        <Box sx={{ display: "flex", gap: 2 }}>
+          <LegendDot color={c.accent} label="Output" c={c} />
+          <LegendDot color={c.muted} dashed label="Target" c={c} />
+        </Box>
+      }
+      sx={{ minHeight: height }}
+    >
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart
+          data={chartData}
+          margin={{ top: 8, right: 8, left: -8, bottom: 0 }}
         >
-            <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart
-                    data={chartData}
-                    margin={{ top: 8, right: 8, left: -18, bottom: 0 }}
-                >
-                    <CartesianGrid
-                        vertical={false}
-                        stroke={c.track}
-                        strokeDasharray="3 3"
-                    />
-                    <XAxis
-                        dataKey="time"
-                        tickLine={false}
-                        axisLine={{ stroke: c.track }}
-                        tick={{ fontSize: 11, fill: c.muted }}
-                        interval={tickInterval}
-                    />
-                    <YAxis
-                        tickLine={false}
-                        axisLine={false}
-                        tick={{ fontSize: 11, fill: c.muted }}
-                        allowDecimals={false}
-                        label={{
-                            value: "Units",
-                            angle: -90,
-                            position: "insideLeft",
-                            offset: 16,
-                            style: { fontSize: 11, fill: c.muted },
-                        }}
-                    />
-                    <Tooltip
-                        contentStyle={{
-                            background: c.cardBg,
-                            border: `1px solid ${c.cardBorder}`,
-                            borderRadius: 8,
-                            fontSize: 12,
-                        }}
-                        labelStyle={{ color: c.title }}
-                        cursor={{ fill: c.track, opacity: 0.4 }}
-                    />
-                    <Bar
-                        dataKey="output"
-                        name="Output"
-                        fill={c.accent}
-                        radius={[3, 3, 0, 0]}
-                        barSize={14}
-                    />
-                    <Line
-                        type="monotone"
-                        dataKey="target"
-                        name="Target"
-                        stroke={c.muted}
-                        strokeWidth={2}
-                        strokeDasharray="5 4"
-                        dot={false}
-                    />
-                </ComposedChart>
-            </ResponsiveContainer>
-        </Panel>
-    );
+          <CartesianGrid
+            vertical={false}
+            stroke={c.track}
+            strokeDasharray="3 3"
+          />
+          <XAxis
+            dataKey="time"
+            tickLine={false}
+            axisLine={{ stroke: c.track }}
+            tick={{ fontSize: 11, fill: c.muted }}
+            interval={tickInterval}
+          />
+          <YAxis
+            tickLine={false}
+            axisLine={false}
+            tick={{ fontSize: 11, fill: c.muted }}
+            allowDecimals={false}
+            label={{
+              value: "Units",
+              angle: -90,
+              position: "insideLeft",
+              offset: 16,
+              style: { fontSize: 11, fill: c.muted },
+            }}
+          />
+          <Tooltip
+            contentStyle={{
+              background: c.cardBg,
+              border: `1px solid ${c.cardBorder}`,
+              borderRadius: 8,
+              fontSize: 12,
+            }}
+            labelStyle={{ color: c.title }}
+            cursor={{ fill: c.track, opacity: 0.4 }}
+          />
+          <Bar
+            dataKey="output"
+            name="Output"
+            fill={c.accent}
+            radius={[3, 3, 0, 0]}
+            barSize={64}
+          />
+          <Line
+            type="monotone"
+            dataKey="target"
+            name="Target"
+            stroke={c.muted}
+            strokeWidth={2}
+            strokeDasharray="5 4"
+            dot={false}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </Panel>
+  );
 }

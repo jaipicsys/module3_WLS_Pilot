@@ -63,7 +63,7 @@ export default function OutputByProduct({ data }) {
                                 sx={{
                                     width: 110,
                                     flexShrink: 0,
-                                    fontSize: 12.5,
+                                    fontSize: 14,
                                     color: c.text,
                                 }}
                             >
@@ -73,7 +73,7 @@ export default function OutputByProduct({ data }) {
                             <Box
                                 sx={{
                                     flex: 1,
-                                    height: 20,
+                                    height: 30,
                                     borderRadius: "4px",
                                     bgcolor: c.track,
                                     overflow: "hidden",

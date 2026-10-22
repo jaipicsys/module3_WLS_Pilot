@@ -48,11 +48,11 @@ export default function KpiCard({
                 <Box
                     sx={{
                         position: "absolute",
-                        top: 16,
-                        right: 16,
+                        top: 20,
+                        right: 20,
                         // color: c.accent,
                         display: "flex",
-                        "& svg": { fontSize: 26 },
+                        "& svg": { fontSize: 30 },
                     }}
                 >
                     {icon}
@@ -61,7 +61,7 @@ export default function KpiCard({
 
             <Typography
                 sx={{
-                    fontSize: 14,
+                    fontSize: 18,
                     fontWeight: 600,
                     color: c.muted,
                     pr: 4,
@@ -72,7 +72,7 @@ export default function KpiCard({
 
             <Typography
                 sx={{
-                    fontSize: 28,
+                    fontSize: 34,
                     fontWeight: 800,
                     lineHeight: 1.1,
                     color: c.title,

@@ -105,7 +105,7 @@ const Overview = () => {
         <Grid container spacing={2}>
           {/* Row 1 — KPI cards */}
           {kpis.map((k) => (
-            <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={k.label}>
+            <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2.5 }} key={k.label}>
               <KpiCard {...k} />
             </Grid>
           ))}

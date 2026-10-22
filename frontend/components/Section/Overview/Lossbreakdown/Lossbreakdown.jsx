@@ -78,7 +78,7 @@ export default function LossBreakdown({ data }) {
                         <Box
                             sx={{
                                 flex: 1,
-                                height: 20,
+                                height: 30,
                                 borderRadius: "4px",
                                 bgcolor: c.track,
                                 overflow: "hidden",

@@ -44,12 +44,12 @@ export default function Panel({
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "space-between",
-                        mb: 1.5,
+                        mb: 3,
                     }}
                 >
                     {title && (
                         <Typography
-                            sx={{ fontSize: 15, fontWeight: 700, color: c.title }}
+                            sx={{ fontSize: 18, fontWeight: 700, color: c.title }}
                         >
                             {title}
                         </Typography>
