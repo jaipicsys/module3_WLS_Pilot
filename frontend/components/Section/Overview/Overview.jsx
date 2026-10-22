@@ -18,6 +18,7 @@ import TopOperators from "./Topoperators/Topoperators";
 import LossBreakdown from "./Lossbreakdown/Lossbreakdown";
 import RecentEvents from "./Recentevents/Recentevents";
 import AlertsNotifications from "./Alertsnotifications/Alertsnotifications";
+import LiveCameraFeed from "./Livecamerafeed/Livecamerafeed";
 
 /* Turn a change percentage into { delta, trend } for KpiCard */
 const change = (pct) => ({
@@ -123,20 +124,20 @@ const Overview = () => {
             />
           </Grid> */}
 
-          {/* <Grid size={{ xs: 12, md: 12, lg: 4 }}>
-            <LiveFeed />
-          </Grid> */}
+          <Grid size={{ xs: 12, md: 12, lg: 6 }}>
+            <LiveCameraFeed />
+          </Grid>
 
           {/* Row 3 — product / operators / loss */}
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
             <OutputByProduct />
           </Grid>
 
-          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
+          <Grid size={{ xs: 12, md: 6, lg: 6 }}>
             <TopOperators />
           </Grid>
 
-          <Grid size={{ xs: 12, md: 12, lg: 4 }}>
+          <Grid size={{ xs: 12, md: 12, lg: 6 }}>
             <LossBreakdown />
           </Grid>
 
@@ -145,7 +146,7 @@ const Overview = () => {
             <RecentEvents />
           </Grid> */}
 
-          <Grid size={{ xs: 12, lg: 4 }}>
+          <Grid size={{ xs: 12, lg: 6 }}>
             <AlertsNotifications />
           </Grid>
         </Grid>

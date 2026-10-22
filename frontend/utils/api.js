@@ -325,3 +325,47 @@ export const getLossBreakdown = async () => {
 
   return res.json();
 };
+
+export const getCameras = async () => {
+  const API_BASE_URL = await getApiBaseUrl();
+  const res = await fetch(`${API_BASE_URL}/api/cameras`);
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch cameras (${res.status})`);
+  }
+
+  return res.json();
+};
+
+// Live feed URL for an <img src={...}>. The browser keeps the MJPEG stream open
+// and updates the picture by itself, so no polling is needed.
+export const getCameraStreamUrl = async (camId) => {
+  const API_BASE_URL = await getApiBaseUrl();
+  return `${API_BASE_URL}/api/camera/${encodeURIComponent(camId)}/stream`;
+};
+
+// Used by LiveCameraFeed: checks the camera is delivering frames and returns
+// the URL to show in an <img>.  -> { streamUrl }
+export const getLiveCameraFeed = async (camId) => {
+  const API_BASE_URL = await getApiBaseUrl();
+
+  const res = await fetch(`${API_BASE_URL}/api/cameras`);
+  if (!res.ok) {
+    throw new Error(`Failed to reach the camera service (${res.status})`);
+  }
+
+  const { cameras = [] } = await res.json();
+  const camera = cameras.find((c) => c.id === camId);
+
+  if (!camera) {
+    throw new Error(`Camera "${camId}" is not configured.`);
+  }
+  if (!camera.online) {
+    throw new Error("Camera is offline. No frames are arriving.");
+  }
+
+  // "t" makes every Refresh open a fresh stream.
+  return {
+    streamUrl: `${API_BASE_URL}/api/camera/${encodeURIComponent(camId)}/stream?t=${Date.now()}`,
+  };
+};
