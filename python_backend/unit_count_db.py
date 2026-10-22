@@ -15,36 +15,31 @@ def shift_date(shift_timings, now=None):
     return now.date().isoformat()
 
 
-def add_count(info, n, now=None):
-    """Add n units to today's row for this shift / station (creates it if missing)."""
+def add_count(info, n=1, now=None):
+    """Insert n rows, one per unit produced (each row has unit_count = 1)."""
     now = now or datetime.now()
     stamp = now.isoformat(sep=" ", timespec="seconds")
     day = shift_date(info.get("shift_timings"), now)
 
+    row = (
+        info["line_id"], info["product_name"], info["shift_id"],
+        info["shift_timings"], info.get("break_name"), info.get("break_timings"),
+        info["operation"], info["station_name"], info["cam_id"],
+        1, info["plant"], day, stamp,
+    )
+
     conn = get_db_connection()
     try:
-        cur = conn.execute(
+        conn.executemany(
             """
-            UPDATE unit_count
-            SET unit_count = COALESCE(unit_count, 0) + ?, updated_at = ?
-            WHERE count_date = ? AND line_id = ? AND shift_id IS ?
-              AND station_name = ? AND cam_id = ?
+            INSERT INTO unit_count
+            (line_id, product_name, shift_id, shift_timings, break_name,
+             break_timings, operation, station_name, cam_id, unit_count,
+             plant, count_date, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (n, stamp, day, info["line_id"], info["shift_id"],
-             info["station_name"], info["cam_id"]),
+            [row] * max(1, int(n)),
         )
-        if cur.rowcount == 0:
-            conn.execute(
-                """
-                INSERT INTO unit_count
-                (line_id, product_name, shift_id, shift_timings, operation,
-                 station_name, cam_id, unit_count, plant, count_date, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (info["line_id"], info["product_name"], info["shift_id"],
-                 info["shift_timings"], info["operation"], info["station_name"],
-                 info["cam_id"], n, info["plant"], day, stamp),
-            )
         conn.commit()
     finally:
         conn.close()
