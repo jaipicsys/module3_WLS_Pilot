@@ -12,6 +12,10 @@ from overview_service import unit_events_source
 
 BUCKET_MINUTES = 5
 
+# Keep drawing empty bars up to "now" only while units are still arriving
+# (last unit newer than this); otherwise the chart stops at the last unit.
+EXTEND_TO_NOW_WITHIN = timedelta(minutes=10)
+
 # Target line on the trend chart. There is no target stored anywhere yet, so
 # this is off (null). Set e.g. 120 to draw 120 units/hour = 10 units per bucket.
 TARGET_PER_HOUR = None
@@ -35,36 +39,58 @@ def _bucket(moment):
 
 # ---------------- Output Trend ----------------
 
+def _describe_tables(conn):
+    """{table: {rows, columns}} so an empty chart can say what it found."""
+    info = {}
+    for (name,) in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlite_sequence'"
+    ).fetchall():
+        columns = [r[1] for r in conn.execute(f'PRAGMA table_info("{name}")').fetchall()]
+        rows = conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+        info[name] = {"rows": rows, "columns": columns}
+    return info
+
+
 def get_output_trend():
     """Units finished per 5 minutes, for the most recent day that has data."""
     empty = {"interval_minutes": BUCKET_MINUTES, "date": None, "series": []}
 
     conn = get_db_connection()
     try:
+        # One row per unit: a separate per-unit table if there is one, otherwise
+        # unit_count itself (each row = units counted, stamped with updated_at).
         source = unit_events_source(conn)
-        if not source:
-            return empty
-        table, col, _ = source
+        if source:
+            table, col, _ = source
+            weight = "1"
+        else:
+            table, col, weight = "unit_count", "updated_at", "COALESCE(unit_count, 1)"
 
         day = conn.execute(f'SELECT MAX(date("{col}")) FROM "{table}"').fetchone()[0]
         if not day:
-            return empty
+            return {
+                **empty,
+                "reason": f'No rows with a valid time in "{table}"."{col}".',
+                "tables": _describe_tables(conn),
+            }
         rows = conn.execute(
-            f'SELECT "{col}" FROM "{table}" WHERE date("{col}") = ?', (day,)
+            f'SELECT "{col}", {weight} FROM "{table}" WHERE date("{col}") = ?', (day,)
         ).fetchall()
     finally:
         conn.close()
 
     counts = {}
+    last_unit = None
     for row in rows:
         moment = datetime.fromisoformat(row[0])
         key = _bucket(moment)
-        counts[key] = counts.get(key, 0) + 1
+        counts[key] = counts.get(key, 0) + int(row[1] or 0)
+        last_unit = moment if last_unit is None else max(last_unit, moment)
 
     first, last = min(counts), max(counts)
     now = datetime.now()
-    if last.date() == now.date():
-        last = max(last, _bucket(now))  # keep the live chart moving
+    if now - last_unit <= EXTEND_TO_NOW_WITHIN:
+        last = max(last, _bucket(now))  # live: keep the chart moving
 
     target = (
         round(TARGET_PER_HOUR * BUCKET_MINUTES / 60, 1) if TARGET_PER_HOUR else None

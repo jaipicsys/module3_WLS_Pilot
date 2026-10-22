@@ -182,13 +182,26 @@ def _events_output(conn):
 
 
 def _count_output(conn):
-    """Fallback: running totals already stored in unit_count."""
+    """unit_count: total units, and when they were counted (updated_at)."""
     total, rows = conn.execute(
         "SELECT COALESCE(SUM(unit_count), 0), COUNT(*) FROM unit_count"
     ).fetchone()
     if not rows:
         return None
-    return {"total": int(total), "day_spans": {}}
+
+    day_spans = {}
+    try:
+        for r in conn.execute(
+            "SELECT date(updated_at) AS d, MIN(updated_at) AS first, MAX(updated_at) AS last "
+            "FROM unit_count WHERE updated_at IS NOT NULL GROUP BY d"
+        ).fetchall():
+            day_spans[datetime.strptime(r["d"], "%Y-%m-%d").date()] = [
+                _parse(r["first"]), _parse(r["last"])
+            ]
+    except sqlite3.OperationalError:
+        pass
+
+    return {"total": int(total), "day_spans": day_spans}
 
 
 # ---------------- public ----------------
@@ -203,15 +216,21 @@ def get_kpi_cards():
     finally:
         conn.close()
 
-    # Output / hour: total output over the time the station was observed
-    # (first to last activity, counted per day so overnight gaps don't count).
-    spans = {}
-    for source in (status, output):
-        for day, (first, last) in (source["day_spans"] if source else {}).items():
-            span = spans.setdefault(day, [first, last])
-            span[0] = min(span[0], first)
-            span[1] = max(span[1], last)
-    observed = sum((last - first).total_seconds() for first, last in spans.values())
+    # Output / hour: total output over the time units were being produced
+    # (first to last unit, per day so overnight gaps don't count). If there is
+    # no per-unit time (just one count), use the operators' activity instead.
+    def span_seconds(spans):
+        return sum((last - first).total_seconds() for first, last in spans.values())
+
+    observed = span_seconds(output["day_spans"]) if output else 0
+    if observed < 60:
+        spans = {}
+        for source in (status, output):
+            for day, (first, last) in (source["day_spans"] if source else {}).items():
+                span = spans.setdefault(day, [first, last])
+                span[0] = min(span[0], first)
+                span[1] = max(span[1], last)
+        observed = span_seconds(spans)
 
     total_output = output["total"] if output else None
     output_per_hour = None
