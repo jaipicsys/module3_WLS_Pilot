@@ -71,7 +71,7 @@ export default function TopOperators({ data, mode = "live", onViewAll }) {
 
   return (
     <Panel
-      title="Top Operators by Output"
+      title="Top Operators"
       action="View All"
       onActionClick={onViewAll}
     >
