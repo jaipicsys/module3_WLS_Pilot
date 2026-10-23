@@ -6,7 +6,7 @@ import PauseCircleOutlineOutlined from "@mui/icons-material/PauseCircleOutlineOu
 import GpsFixedOutlined from "@mui/icons-material/GpsFixed";
 import ChecklistRtlIcon from "@mui/icons-material/ChecklistRtl";
 import { TbPackageExport } from "react-icons/tb";
-
+import DonutLargeIcon from "@mui/icons-material/DonutLarge";
 import Header from "../../Layout/Header/Header";
 import { getKpiCards } from "../../../utils/api";
 import KpiCard from "./Kpicard/Kpicard";
@@ -74,7 +74,7 @@ const Overview = () => {
         icon: <Inventory2Outlined />,
       },
       {
-        label: "Output / Hour",
+        label: "Throughput",
         value: d.output_per_hour
           ? Number(d.output_per_hour.value).toLocaleString()
           : "—",
@@ -91,6 +91,14 @@ const Overview = () => {
         trend: null,
         sub: "of available time",
         icon: <AccessTimeOutlined />,
+      },
+      {
+        label: "Utilization",
+        value: d.productive_time
+          ? `${d.productive_time.pct_of_available}%`
+          : "—",
+        sub: "productive time / total operator time",
+        icon: <DonutLargeIcon />,
       },
       {
         label: "Idle / Waiting Time",
@@ -116,7 +124,7 @@ const Overview = () => {
         <Grid container spacing={2}>
           {/* Row 1 — KPI cards */}
           {kpis.map((k) => (
-            <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2.5 }} key={k.label}>
+            <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2 }} key={k.label}>
               <KpiCard {...k} />
             </Grid>
           ))}

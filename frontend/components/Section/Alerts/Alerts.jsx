@@ -216,7 +216,7 @@ const Alerts = () => {
                     <Typography>{selected.reason}</Typography>
                   </Box>
 
-                  <Box>
+                  {/* <Box>
                     <Typography
                       variant="caption"
                       color="text.secondary"
@@ -224,7 +224,7 @@ const Alerts = () => {
                       Description
                     </Typography>
                     <Typography>{selected.description}</Typography>
-                  </Box>
+                  </Box> */}
 
                   <Stack
                     direction={{ xs: "column", sm: "row" }}
