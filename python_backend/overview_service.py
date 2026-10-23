@@ -161,10 +161,11 @@ def _status_time(conn, now):
     for seg in segments:
         day = days.setdefault(
             seg["start"].date(),
-            {"productive": 0.0, "idle": 0.0, "away": 0.0, "span": [seg["start"], seg["end"]]},
+            {"productive": 0.0, "idle": 0.0, "away": 0.0, "ops": set(), "span": [seg["start"], seg["end"]]},
         )
         day["span"][0] = min(day["span"][0], seg["start"])
         day["span"][1] = max(day["span"][1], seg["end"])
+        day["ops"].add(seg["operator_id"])
 
         if seg["status"] in PRODUCTIVE_STATUSES:
             day["productive"] += seg["seconds"]
@@ -177,6 +178,12 @@ def _status_time(conn, now):
         "productive": sum(d["productive"] for d in days.values()),
         "idle": sum(d["idle"] for d in days.values()),
         "away": sum(d["away"] for d in days.values()),
+        # Total time of all operators: (number of operators) x (monitored time),
+        # worked out per day, e.g. 7 operators x 30 minutes = 3h 30m.
+        "operator_seconds": sum(
+            len(d["ops"]) * (d["span"][1] - d["span"][0]).total_seconds()
+            for d in days.values()
+        ),
         "day_spans": {d: day["span"] for d, day in days.items()},
         "live": live,
     }
@@ -271,13 +278,13 @@ def get_kpi_cards(mode="live"):
 
     productive_time = idle_time = None
     if status:
-        tracked = status["productive"] + status["idle"] + status["away"]
+        total_time = status["operator_seconds"]  # all operators together
 
         def card(seconds):
             return {
                 "seconds": round(seconds, 1),
                 "display": fmt_hours_minutes(seconds),
-                "pct_of_available": round(seconds / tracked * 100, 1) if tracked else 0,
+                "pct_of_available": round(seconds / total_time * 100, 1) if total_time else 0,
             }
 
         productive_time = card(status["productive"])

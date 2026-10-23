@@ -31,3 +31,5 @@ recordings/
 .vscode/
 .idea/
 .DS_Store
+
+*.mp4

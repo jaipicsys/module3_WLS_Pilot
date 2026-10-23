@@ -6,7 +6,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DB = os.path.join(BASE_DIR, "data.db")
 # The saved run used by recorded mode (read-only). Change the name here, or set
 # the RECORDED_DB_FILE environment variable. It must sit next to data.db.
-RECORDED_DB_FILE = os.environ.get("RECORDED_DB_FILE", "oct22_04_31.db")
+RECORDED_DB_FILE = os.environ.get("RECORDED_DB_FILE", "oct_23_11_34.db")
 RECORDED_DB = os.path.join(BASE_DIR, RECORDED_DB_FILE)
 AUTH_DB = os.path.join(BASE_DIR, "auth.db")
 
