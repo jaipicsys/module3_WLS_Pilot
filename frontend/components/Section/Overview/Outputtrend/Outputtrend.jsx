@@ -146,6 +146,7 @@ export default function OutputTrend({ data, mode = "live", height = 300 }) {
             fill={c.accent}
             radius={[3, 3, 0, 0]}
             barSize={64}
+            isAnimationActive={false}
           >
             <LabelList
               dataKey="output"
