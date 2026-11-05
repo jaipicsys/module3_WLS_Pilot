@@ -16,6 +16,7 @@ from config_utils import (
     get_shift_and_break,
     resolve_model_path,
 )
+from person_tracking import PersonTracker
 
 ACTIVE = "active_work"
 IDLE = "idle"
@@ -40,10 +41,14 @@ COLOR_ACTIVE = (0, 200, 0)
 COLOR_IDLE = (0, 165, 255)
 COLOR_AWAY = (60, 60, 255)
 COLOR_SEAT = (0, 255, 255)
+COLOR_BOUND_ROI = (150, 150, 150)
 COLOR_PENDING = (200, 200, 200)
 COLOR_DEBUG = (255, 255, 255)
 COLOR_NO_POSE = (130, 130, 130)
 COLOR_YELLOW = (0, 255, 255)
+COLOR_TRACK = (170, 170, 170)
+
+_UNSET = object()
 
 LOGICS = {
     "wrist_on_towel": {
@@ -116,9 +121,26 @@ class OperatorState:
         self.present_since = None
 
 
+class OperatorBinding:
+    """Which P-ID uses this operator's logic. Decided once, from the ROI."""
+
+    def __init__(self):
+        self.gid = None          # P-ID that uses this operator's logic (None = not decided)
+        self.cand = None         # P-ID being timed inside the ROI
+        self.cand_since = None
+        self.cand_last = None
+
+
 class FrameLogic:
     """
-    1. Operators: one ROI each, own logic -> ACTIVE / IDLE / AWAY.
+    1. Operators = tracked people (P-IDs) -> ACTIVE / IDLE / AWAY.
+       The operator ROIs are used ONLY at the start: the P-ID that settles in
+       OP1's ROI (same ID for bind_seconds) gets OP1's logic, for the rest of
+       the shift, wherever it moves. operator_status.operator_id = the P-ID
+       ("P2"), not the operator name.
+       If the P-ID is not seen (ID switch, occlusion), its status is held for
+       id_grace_seconds (30 s). Back within that time -> continues. Not back
+       -> AWAY from the moment it was last seen.
     2. Units: the yellow person overlaps a closed box -> +1 (no pose).
     """
 
@@ -155,6 +177,13 @@ class FrameLogic:
         self.debug_draw = cfg.get("debug_draw", False)
         self.ignore_names = [n.lower() for n in cfg.get("ignore_classes", [])]
         self.draw = CONFIG.get("enable_display", False)
+
+        # ---- ID binding ----
+        tcfg = CONFIG.get("tracking", {})
+        self.bind_seconds = tcfg.get("bind_seconds", 5)
+        self.bind_gap = tcfg.get("bind_gap_seconds", 2)
+        self.id_grace = max(tcfg.get("id_grace_seconds", 30), self.away_seconds)
+        self.reset_on_shift = tcfg.get("reset_on_shift_change", True)
 
         # ---- operators ----
         self.ops = {}
@@ -212,12 +241,13 @@ class FrameLogic:
         op_cfg = CONFIG["operations"][self.station["operation"]]
         self.det_conf = op_cfg.get("conf_thresh", 0.6)
         self.detect_conf = min(
-            self.det_conf, self.person_conf, self.towel_conf,
+            self.det_conf, self.towel_conf,
             self.bwt_conf, self.near_conf, self.yellow_conf, self.box_conf,
             self.wobj_conf,
         )
 
-        self.det_model = YOLO(resolve_model_path(op_cfg["model"]))
+        det_weights = resolve_model_path(op_cfg["model"])
+        self.det_model = YOLO(det_weights)
         self.pose_model = YOLO(resolve_model_path(CONFIG["pose_model"]))
 
         self.names = self.det_model.names
@@ -242,20 +272,40 @@ class FrameLogic:
         if self.yellow_name in self.ignore_names:
             raise ValueError("Yellow_Person must not be in ignore_classes")
 
+        # People now come from the tracker, so the detector skips its person class.
         ignore_ids = {i for i, n in lower.items() if n in self.ignore_names}
+        ignore_ids.add(self.person_class)
         self.detect_classes = [i for i in self.names if i not in ignore_ids]
+
+        # ---- person tracking (stable P-IDs) ----
+        self.tracker = PersonTracker(
+            camera_id, self.device, self.half,
+            fallback_weights=det_weights, fallback_class=self.person_class,
+        )
+        self.tracks = []
+        self.bindings = {oid: OperatorBinding() for oid in self.ops}
+        self._shift_id = _UNSET
+        self._shift_checked = 0.0
 
         print(f"[INFO] {camera_id}: operators "
               f"{ {k: v['logic_name'] for k, v in self.ops.items()} }, "
+              f"bind after {self.bind_seconds}s in ROI, "
               f"counting {self.box_names} touched by {self.yellow_name}")
 
-        self.state = {oid: OperatorState() for oid in self.ops}
+        # Keyed by P-ID label ("P2"). camera_worker may replace this dict on a
+        # stream gap; entries are created on demand, so that is fine.
+        self.state = {}
         self.raw = []
 
     # ---------------- main entry ----------------
 
     def process(self, frame):
         now = time.time()
+        self._check_shift(now)
+
+        self.tracks = self.tracker.update(frame)
+        self._update_bindings(now)
+
         persons, towels, bwts, near, wobjs, objects, boxes = self._detect(frame)
 
         ctx = {"towels": towels, "bwts": bwts, "near": near, "wobjs": wobjs}
@@ -272,8 +322,103 @@ class FrameLogic:
         return frame
 
     def on_stream_gap(self):
-        """Called by the camera worker when the stream drops."""
+        """Called by the camera worker when the stream drops.
+        P-IDs and bindings are kept: the same people come back after a reconnect."""
         self.counter.reset()
+
+    def reset_identities(self):
+        """Forget all P-IDs and bindings (ROIs decide again). Open status rows
+        are closed first, because the same P-ID may be a different person next."""
+        now = time.time()
+        for key, st in self.state.items():
+            if st.segment_id is not None and st.since is not None:
+                try:
+                    operator_db.close_segment(st.segment_id, self._iso(now), now - st.since)
+                except Exception as e:
+                    print(f"[ERROR] closing {key} failed: {e}")
+        self.state = {}
+        self.tracker.reset()
+        self.bindings = {oid: OperatorBinding() for oid in self.ops}
+        print(f"[BIND] {self.camera_id}: all bindings cleared, ROIs decide again")
+
+    def _check_shift(self, now):
+        """New shift = new people: the closed set of P-IDs starts again."""
+        if not self.reset_on_shift or now - self._shift_checked < 5:
+            return
+        self._shift_checked = now
+        shift, _ = get_shift_and_break(self.line, datetime.now())
+        sid = shift["shift_id"] if shift else None
+        if self._shift_id is _UNSET:
+            self._shift_id = sid
+            return
+        if sid != self._shift_id:
+            print(f"[BIND] {self.camera_id}: shift {self._shift_id} -> {sid}")
+            self._shift_id = sid
+            self.reset_identities()
+
+    # ---------------- ID <-> operator binding ----------------
+
+    def _roi_dist(self, o, box):
+        """Distance from the ROI centre if the box centre or feet are inside, else None."""
+        x1, y1, x2, y2 = box
+        centre = ((x1 + x2) / 2, (y1 + y2) / 2)
+        feet = ((x1 + x2) / 2, y2)
+        if _inside(o["roi"], centre) or _inside(o["roi"], feet):
+            sx, sy = o["centre"]
+            return float(np.hypot(centre[0] - sx, centre[1] - sy))
+        return None
+
+    def _update_bindings(self, now):
+        """
+        Only for operators that have no P-ID yet. The P-ID in the operator's ROI
+        (nearest the centre) is timed; the same ID for bind_seconds -> that P-ID
+        uses this operator's logic from now on. A different ID restarts the timer;
+        a dropout up to bind_gap_seconds does not. Once bound, never changed
+        (until a shift reset).
+        """
+        open_ops = [oid for oid, b in self.bindings.items() if b.gid is None]
+        if not open_ops:
+            return
+
+        visible = {t["gid"]: t for t in self.tracks if t["gid"] > 0}
+        taken = {b.gid for b in self.bindings.values() if b.gid is not None}
+
+        pairs = []
+        for oid in open_ops:
+            for gid, t in visible.items():
+                if gid in taken:
+                    continue
+                d = self._roi_dist(self.ops[oid], t["box"])
+                if d is not None:
+                    pairs.append((d, gid, oid))
+        pairs.sort()
+
+        chosen, used = {}, set()
+        for _, gid, oid in pairs:
+            if oid in chosen or gid in used:
+                continue
+            chosen[oid] = gid
+            used.add(gid)
+
+        for oid in open_ops:
+            b = self.bindings[oid]
+            cand = chosen.get(oid)
+
+            if cand is None:
+                if b.cand is not None and now - b.cand_last > self.bind_gap:
+                    b.cand = None
+                continue
+
+            if cand != b.cand:
+                b.cand, b.cand_since, b.cand_last = cand, now, now  # ID changed: restart
+                continue
+
+            b.cand_last = now
+            if now - b.cand_since >= self.bind_seconds:
+                b.gid, b.cand = cand, None
+                taken.add(cand)
+                print(f"[BIND] {self.camera_id}: P{cand} uses {oid} logic "
+                      f"({self.ops[oid]['logic_name']})")
 
     # ---------------- detection ----------------
 
@@ -287,7 +432,7 @@ class FrameLogic:
             verbose=False,
         )[0]
 
-        people, towels, bwts, near, wobjs = [], [], [], [], []
+        towels, bwts, near, wobjs = [], [], [], []
         objects, boxes_out = [], []
         yellow, c_boxes = [], []
         self.raw = []
@@ -304,9 +449,7 @@ class FrameLogic:
                 self.raw.append((name, float(conf), box))
 
                 if cls == self.person_class:
-                    if conf >= self.person_conf:
-                        people.append({"box": box})
-                    continue
+                    continue  # people come from the tracker
 
                 if lname == self.towel_name:
                     if conf >= self.towel_conf:
@@ -341,7 +484,7 @@ class FrameLogic:
 
         self._cin = {"yellow": yellow, "boxes": c_boxes}
 
-        persons = self._assign_operators(people)
+        persons = self._assign_operators()
 
         for p in persons:
             if self.ops[p["op"]]["needs_pose"]:
@@ -349,28 +492,18 @@ class FrameLogic:
 
         return persons, towels, bwts, near, wobjs, objects, boxes_out
 
-    def _assign_operators(self, people):
-        """A person is in an ROI if their centre or feet are inside it.
-        One person per operator (nearest to the ROI centre)."""
-        pairs = []
-        for i, p in enumerate(people):
-            x1, y1, x2, y2 = p["box"]
-            centre = ((x1 + x2) / 2, (y1 + y2) / 2)
-            feet = ((x1 + x2) / 2, y2)
-            for oid, o in self.ops.items():
-                if _inside(o["roi"], centre) or _inside(o["roi"], feet):
-                    sx, sy = o["centre"]
-                    pairs.append((np.hypot(centre[0] - sx, centre[1] - sy), i, oid))
-
-        pairs.sort()
-        used_p, used_o, out = set(), set(), []
-        for _, i, oid in pairs:
-            if i in used_p or oid in used_o:
+    def _assign_operators(self):
+        """Every bound P-ID that is visible, with the operator whose logic it uses."""
+        by_gid = {t["gid"]: i for i, t in enumerate(self.tracks) if t["gid"] > 0}
+        out = []
+        for oid, b in self.bindings.items():
+            if b.gid is None or b.gid not in by_gid:
                 continue
-            used_p.add(i)
-            used_o.add(oid)
+            i = by_gid[b.gid]
+            t = self.tracks[i]
             out.append({
-                "box": people[i]["box"], "op": oid, "working": False,
+                "box": t["box"], "op": oid, "gid": b.gid, "key": f"P{b.gid}",
+                "track_idx": i, "working": False,
                 "kxy": None, "kconf": None, "pose_ok": False,
             })
         return out
@@ -455,7 +588,7 @@ class FrameLogic:
                 b["touched"] = True
 
     def _logic_always_active(self, p, ctx, o):
-        """In the ROI means ACTIVE."""
+        """Visible means ACTIVE."""
         p["working"] = True
 
     def _logic_box_near(self, p, ctx, o):
@@ -516,8 +649,12 @@ class FrameLogic:
     def _update_operators(self, persons, now):
         by_op = {p["op"]: p for p in persons}
 
-        for oid, o in self.ops.items():
-            st = self.state[oid]
+        for oid, b in self.bindings.items():
+            if b.gid is None:
+                continue
+            o = self.ops[oid]
+            key = f"P{b.gid}"
+            st = self.state.setdefault(key, OperatorState())
             p = by_op.get(oid)
 
             if p is not None:
@@ -537,20 +674,22 @@ class FrameLogic:
                         and now - st.present_since < o["hold"]):
                     continue
 
-                self._update_status(oid, st, raw, now)
+                self._update_status(oid, key, st, raw, now)
                 continue
 
             st.present_since = None
 
+            # Not seen: hold the status for id_grace seconds (ID may come back).
+            # AWAY then starts at the last time the P-ID was seen.
             if (st.last_seen is not None
-                    and now - st.last_seen >= self.away_seconds
+                    and now - st.last_seen >= self.id_grace
                     and st.status is not None
                     and st.status != AWAY):
-                self._commit(oid, st, AWAY, st.last_seen)
+                self._commit(oid, key, st, AWAY, st.last_seen)
 
-    def _update_status(self, oid, st, raw, now):
+    def _update_status(self, oid, key, st, raw, now):
         if st.status is None:
-            self._commit(oid, st, raw, now)
+            self._commit(oid, key, st, raw, now)
             return
 
         if raw == st.status:
@@ -563,12 +702,13 @@ class FrameLogic:
             return
 
         if now - st.candidate_since >= self.debounce:
-            self._commit(oid, st, raw, st.candidate_since)
+            self._commit(oid, key, st, raw, st.candidate_since)
 
-    def _commit(self, oid, st, state, start_ts):
+    def _commit(self, oid, key, st, state, start_ts):
+        """oid = operator whose logic is used (idle reason), key = P-ID stored in the DB."""
         if st.since is not None:
             start_ts = max(start_ts, st.since)
-        print(f"[STATUS] {self.camera_id} {oid}: {st.status} -> {state}")
+        print(f"[STATUS] {self.camera_id} {key} ({oid} logic): {st.status} -> {state}")
 
         reason = (REASON_AWAY if state == AWAY
                   else self.ops[oid]["idle_reason"] if state == IDLE else None)
@@ -578,7 +718,7 @@ class FrameLogic:
                     st.segment_id, self._iso(start_ts), start_ts - st.since
                 )
             st.segment_id = operator_db.open_segment(
-                self._build_row(state, reason, datetime.fromtimestamp(start_ts), oid)
+                self._build_row(state, reason, datetime.fromtimestamp(start_ts), key)
             )
         except Exception as e:
             print(f"[ERROR] operator_status write failed: {e}")
@@ -591,7 +731,7 @@ class FrameLogic:
     def _iso(ts):
         return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
 
-    def _build_row(self, state, reason, start_dt, oid):
+    def _build_row(self, state, reason, start_dt, operator_id):
         shift, brk = get_shift_and_break(self.line, start_dt)
         return {
             "line_id": self.line_id,
@@ -606,7 +746,7 @@ class FrameLogic:
             "start_time": self._iso(start_dt.timestamp()),
             "status": state,
             "reasons": reason,
-            "operator_id": oid,
+            "operator_id": operator_id,
             "plant": CONFIG.get("plant"),
         }
 
@@ -644,18 +784,22 @@ class FrameLogic:
                             (x1, min(frame.shape[0] - 5, y2 + 22)),
                             FONT, 0.7, COLOR_DEBUG, 2)
 
-        occupied = {p["op"] for p in persons}
+        # ROIs: yellow while waiting for a P-ID, thin grey once decided
         for oid, o in self.ops.items():
-            cv2.polylines(frame, [o["roi"]], True, COLOR_SEAT, 3)
-            cx, cy = o["centre"]
-            st = self.state[oid]
-            if oid in occupied:
-                tag, color = oid, COLOR_SEAT
-            elif st.status == AWAY:
-                tag, color = f"{oid} AWAY", COLOR_AWAY
+            b = self.bindings[oid]
+            if b.gid is not None:
+                st = self.state.get(f"P{b.gid}")
+                tag, color, thick = f"{oid} -> P{b.gid}", COLOR_BOUND_ROI, 1
+                if st is not None and st.status == AWAY:
+                    tag, color = f"{tag} AWAY", COLOR_AWAY
+            elif b.cand is not None:
+                tag = f"{oid} P{b.cand}? {int(now - b.cand_since)}/{int(self.bind_seconds)}s"
+                color, thick = COLOR_SEAT, 3
             else:
-                tag, color = f"{oid} (empty)", COLOR_SEAT
-            cv2.putText(frame, tag, (int(cx) - 50, int(cy)), FONT, 1.0, color, 2)
+                tag, color, thick = f"{oid} (waiting)", COLOR_SEAT, 3
+            cv2.polylines(frame, [o["roi"]], True, color, thick)
+            cx, cy = o["centre"]
+            cv2.putText(frame, tag, (int(cx) - 60, int(cy)), FONT, 0.9, color, 2)
 
         for ob in objects:
             x1, y1, x2, y2 = map(int, ob["box"])
@@ -692,24 +836,35 @@ class FrameLogic:
             color = COLOR_ACTIVE if t["touched"] else OBJECT_COLORS["towel"]
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 5 if t["touched"] else 2)
 
+        # Tracked people who are not an operator right now (thin grey)
+        assigned = {p["track_idx"] for p in persons}
+        for i, t in enumerate(self.tracks):
+            if i in assigned:
+                continue
+            x1, y1, x2, y2 = map(int, t["box"])
+            tag = f"P{t['gid']}" if t["gid"] > 0 else f"? t{t['lid']}"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_TRACK, 2)
+            cv2.putText(frame, tag, (x1 + 4, y1 + 26), FONT, 0.8, COLOR_TRACK, 2)
+
         for p in persons:
             x1, y1, x2, y2 = map(int, p["box"])
             oid = p["op"]
-            st = self.state[oid]
+            st = self.state.get(p["key"]) or OperatorState()
+            who = f"{p['key']} [{oid}]"
 
             if st.status == ACTIVE:
-                color, label = COLOR_ACTIVE, f"{oid}  ACTIVE"
+                color, label = COLOR_ACTIVE, f"{who}  ACTIVE"
             elif st.status == IDLE:
-                color, label = COLOR_IDLE, f"{oid}  IDLE"
+                color, label = COLOR_IDLE, f"{who}  IDLE"
             else:
-                color, label = COLOR_PENDING, f"{oid}  ..."
+                color, label = COLOR_PENDING, f"{who}  ..."
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 5)
-            (tw, th), _ = cv2.getTextSize(label, FONT, 1.4, 3)
+            (tw, th), _ = cv2.getTextSize(label, FONT, 1.2, 3)
             top = max(0, y1 - th - 24)
             cv2.rectangle(frame, (x1, top), (x1 + tw + 20, top + th + 24), color, -1)
             cv2.putText(frame, label, (x1 + 10, top + th + 8),
-                        FONT, 1.4, (0, 0, 0), 3)
+                        FONT, 1.2, (0, 0, 0), 3)
 
             if p["kxy"] is not None:
                 dot = COLOR_NO_POSE if not p["pose_ok"] else (

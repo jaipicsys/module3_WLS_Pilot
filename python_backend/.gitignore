@@ -33,3 +33,7 @@ recordings/
 .DS_Store
 
 *.mp4
+
+tracking_runtime/
+
+logs/

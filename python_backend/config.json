@@ -9,14 +9,14 @@
   "record_dir": "recordings",
   "record_fps": 10,
   "record_scale": 0.5,
-  "record_segment_minutes": 10,
+  "record_segment_minutes": 30,
   "record_codec": "MJPG",
   "record_ext": "avi",
   "record_retention_days": 7,
   "plant": "Unit 1 Textile",
 
   "rtsp_urls": {
-    "cam1": "rtsp://192.168.2.10:8554/cam1"
+    "cam1": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/packing.mp4"
   },
 
   "models_dir": "models",
@@ -24,8 +24,25 @@
 
   "operations": {
     "Packing": {
-      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_oct12_6.pt",
+      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt",
       "conf_thresh": 0.6
+    }
+  },
+
+  "tracking": {
+    "person_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt",
+    "reid_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
+    "person_class": 0,
+    "max_ids": 9,
+    "fps": 10,
+    "bind_seconds": 5,
+    "bind_gap_seconds": 2,
+    "id_grace_seconds": 30,
+    "reset_on_shift_change": true,
+    "print_events": true,
+    "overrides": {
+      "gallery_mode": "frozen",
+      "learn_s": 60
     }
   },
 
