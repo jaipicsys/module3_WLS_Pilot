@@ -21,6 +21,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 from ultralytics import YOLO
 
@@ -43,11 +44,17 @@ def _default_args():
 
 
 class PersonTracker:
-    def __init__(self, camera_id, device, half, fallback_weights=None, fallback_class=0):
+    def __init__(self, camera_id, device, half, fallback_weights=None, fallback_class=0,
+                 roi=None):
         cfg = CONFIG.get("tracking", {})
         self.camera_id = camera_id
         self.device = device
         self.half = half
+
+        # Station ROI: only people inside it are tracked / get P-IDs.
+        self.roi = None
+        if roi is not None and len(roi) >= 3 and cfg.get("station_roi_only", True):
+            self.roi = np.array(roi, dtype=np.int32).reshape(-1, 1, 2)
 
         # ---- tracker options: script defaults, then config.json ----
         self.args = _default_args()
@@ -93,7 +100,16 @@ class PersonTracker:
         self.mgr = None
         self.frame_idx = 0
         print(f"[INFO] {camera_id}: person tracking on, max_ids={self.args.max_ids}, "
-              f"gallery={self.args.gallery_mode}, learn_s={self.args.learn_s}")
+              f"gallery={self.args.gallery_mode}, learn_s={self.args.learn_s}, "
+              f"area={'station ROI' if self.roi is not None else 'full frame'}")
+
+    def _in_roi(self, box):
+        """Box centre or feet inside the station ROI."""
+        x1, y1, x2, y2 = box
+        for pt in (((x1 + x2) / 2, (y1 + y2) / 2), ((x1 + x2) / 2, y2)):
+            if cv2.pointPolygonTest(self.roi, (float(pt[0]), float(pt[1])), False) >= 0:
+                return True
+        return False
 
     # ------------------------------------------------------------------ #
     def _log(self, fi, msg):
@@ -147,6 +163,12 @@ class PersonTracker:
             confs = b.conf.cpu().numpy()
         else:
             boxes, lids, confs = np.zeros((0, 4), np.float32), [], np.zeros(0)
+
+        # People outside the station ROI are ignored: no P-ID, no gallery, no slot used.
+        if self.roi is not None and len(lids):
+            keep = [i for i, bx in enumerate(boxes) if self._in_roi(bx)]
+            boxes, confs = boxes[keep], confs[keep]
+            lids = [lids[i] for i in keep]
 
         results = self.mgr.update(
             self.frame_idx, lids, boxes, confs, lambda bx: self.encoder(frame, bx)

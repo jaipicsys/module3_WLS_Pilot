@@ -16,7 +16,7 @@
   "plant": "Unit 1 Textile",
 
   "rtsp_urls": {
-    "cam1": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/packing.mp4"
+    "cam1": "rtsp://192.168.2.22:8554/cam1"
   },
 
   "models_dir": "models",
@@ -43,7 +43,8 @@
     "overrides": {
       "gallery_mode": "frozen",
       "learn_s": 60
-    }
+    },
+    "roi_margin_px": 150
   },
 
   "operator_status": {

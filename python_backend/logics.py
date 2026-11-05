@@ -281,7 +281,9 @@ class FrameLogic:
         self.tracker = PersonTracker(
             camera_id, self.device, self.half,
             fallback_weights=det_weights, fallback_class=self.person_class,
+            roi=self.station.get("roi"),
         )
+        self.station_roi = self.tracker.roi
         self.tracks = []
         self.bindings = {oid: OperatorBinding() for oid in self.ops}
         self._shift_id = _UNSET
@@ -783,6 +785,10 @@ class FrameLogic:
                 cv2.putText(frame, f"{name} {conf:.2f}",
                             (x1, min(frame.shape[0] - 5, y2 + 22)),
                             FONT, 0.7, COLOR_DEBUG, 2)
+
+        # Station ROI: the only area where people are tracked
+        if self.station_roi is not None:
+            cv2.polylines(frame, [self.station_roi], True, (255, 255, 255), 2)
 
         # ROIs: yellow while waiting for a P-ID, thin grey once decided
         for oid, o in self.ops.items():
