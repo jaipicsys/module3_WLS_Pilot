@@ -109,6 +109,15 @@ def _boxes_touch(a, b):
     return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
 
 
+def _iou(a, b):
+    """Intersection over union of two xyxy boxes."""
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / max(1e-9, ua)
+
+
 class OperatorState:
     def __init__(self):
         self.status = None
@@ -138,6 +147,8 @@ class FrameLogic:
        OP1's ROI (same ID for bind_seconds) gets OP1's logic, for the rest of
        the shift, wherever it moves. operator_status.operator_id = the P-ID
        ("P2"), not the operator name.
+       A P-ID is only a binding candidate once it is "stable" (seen long enough
+       / gallery learnt) and not overlapping another person.
        If the P-ID is not seen (ID switch, occlusion), its status is held for
        id_grace_seconds (30 s). Back within that time -> continues. Not back
        -> AWAY from the moment it was last seen.
@@ -182,6 +193,8 @@ class FrameLogic:
         tcfg = CONFIG.get("tracking", {})
         self.bind_seconds = tcfg.get("bind_seconds", 5)
         self.bind_gap = tcfg.get("bind_gap_seconds", 2)
+        self.bind_min_seen = tcfg.get("bind_min_seen_seconds", 20)
+        self.bind_need_frozen = tcfg.get("bind_require_frozen", False)
         self.id_grace = max(tcfg.get("id_grace_seconds", 30), self.away_seconds)
         self.reset_on_shift = tcfg.get("reset_on_shift_change", True)
 
@@ -305,7 +318,7 @@ class FrameLogic:
         now = time.time()
         self._check_shift(now)
 
-        self.tracks = self.tracker.update(frame)
+        self.tracks = self.tracker.latest()  # tracker runs in its own process (camera_worker starts it)
         self._update_bindings(now)
 
         persons, towels, bwts, near, wobjs, objects, boxes = self._detect(frame)
@@ -377,12 +390,25 @@ class FrameLogic:
         uses this operator's logic from now on. A different ID restarts the timer;
         a dropout up to bind_gap_seconds does not. Once bound, never changed
         (until a shift reset).
+
+        A P-ID is only a candidate when it is stable (linked to a live track and
+        seen for bind_min_seen_seconds, or its gallery is frozen) and its box does
+        not overlap another person's box.
         """
         open_ops = [oid for oid, b in self.bindings.items() if b.gid is None]
         if not open_ops:
             return
 
-        visible = {t["gid"]: t for t in self.tracks if t["gid"] > 0}
+        def ambiguous(t):
+            return any(u is not t and _iou(t["box"], u["box"]) > 0.15
+                       for u in self.tracks)
+
+        visible = {
+            t["gid"]: t for t in self.tracks
+            if t["gid"] > 0
+            and self.tracker.is_stable(t["gid"], self.bind_min_seen, self.bind_need_frozen)
+            and not ambiguous(t)
+        }
         taken = {b.gid for b in self.bindings.values() if b.gid is not None}
 
         pairs = []
@@ -786,7 +812,7 @@ class FrameLogic:
                             (x1, min(frame.shape[0] - 5, y2 + 22)),
                             FONT, 0.7, COLOR_DEBUG, 2)
 
-        # Station ROI: the only area where people are tracked
+        # Station ROI (drawn for reference)
         if self.station_roi is not None:
             cv2.polylines(frame, [self.station_roi], True, (255, 255, 255), 2)
 

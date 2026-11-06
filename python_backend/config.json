@@ -16,7 +16,7 @@
   "plant": "Unit 1 Textile",
 
   "rtsp_urls": {
-    "cam1": "rtsp://192.168.2.22:8554/cam1"
+    "cam1": "rtsp://192.168.2.218:8554/cam1"
   },
 
   "models_dir": "models",
@@ -33,18 +33,19 @@
     "person_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt",
     "reid_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
     "person_class": 0,
-    "max_ids": 9,
-    "fps": 10,
+    "max_ids": 7,
     "bind_seconds": 5,
     "bind_gap_seconds": 2,
+    "bind_min_seen_seconds": 20,
+    "bind_require_frozen": false,
     "id_grace_seconds": 30,
-    "reset_on_shift_change": true,
+    "reset_on_shift_change": false,
     "print_events": true,
     "overrides": {
       "gallery_mode": "frozen",
-      "learn_s": 60
-    },
-    "roi_margin_px": 150
+      "learn_s": 60,
+      "verify_margin": 0.15
+    }
   },
 
   "operator_status": {

@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+from threading import Lock, Thread
 
 # Use TCP for RTSP and give up on a dead connection after 5 seconds
 # (otherwise OpenCV can hang ~30s on an unreachable camera).
@@ -23,6 +24,50 @@ RECORD_VIDEO = CONFIG.get("record_video", False)
 # Optional "live_feed" block in config.json: {"fps": 10, "width": 960, "quality": 70}
 LIVE_FEED = CONFIG.get("live_feed", {})
 hub.configure(LIVE_FEED.get("fps"), LIVE_FEED.get("width"), LIVE_FEED.get("quality"))
+
+
+class LatestFrame:
+    """
+    Reads the stream in its own thread so the RTSP buffer never backs up while
+    the models are busy. read() returns the newest frame not seen yet, so the
+    tracker always works on the latest picture (same idea as RTSPReader in
+    track_people_osnet_frozen.py).
+    """
+
+    def __init__(self, cap):
+        self.cap = cap
+        self.lock = Lock()
+        self.frame = None
+        self.seq = 0
+        self.alive = True
+        self.stop = False
+        self.thread = Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self.stop:
+            ret, f = self.cap.read()
+            if not ret:
+                self.alive = False
+                return
+            with self.lock:
+                self.frame, self.seq = f, self.seq + 1
+
+    def read(self, last_seq, timeout=5.0):
+        """Returns (ok, frame, seq). ok=False when the stream ended or timed out."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            with self.lock:
+                if self.frame is not None and self.seq != last_seq:
+                    return True, self.frame, self.seq
+            if not self.alive:
+                return False, None, last_seq
+            time.sleep(0.003)
+        return False, None, last_seq
+
+    def close(self):
+        self.stop = True
+        self.thread.join(timeout=6)
 
 
 class CameraWorker:
@@ -110,6 +155,10 @@ class CameraWorker:
         window_name = f"Camera - {self.camera_id}"
         stop = False
 
+        # Tracking + ReID: the standalone loop in its own process (own RTSP connection).
+        # Started once; it reconnects by itself and keeps the P-IDs.
+        self.logic.tracker.start()
+
         try:
             while not stop:
                 cap = cv2.VideoCapture(self.rtsp_url)
@@ -125,9 +174,14 @@ class CameraWorker:
 
                 print(f"[INFO] {self.camera_id} connected.")
 
+                # Stream is read in its own thread; processing always gets the newest frame.
+                reader = LatestFrame(cap)
+                seq = 0
+
+
                 try:
                     while True:
-                        ret, frame = cap.read()
+                        ret, frame, seq = reader.read(seq)
 
                         if not ret:
                             print(
@@ -143,7 +197,9 @@ class CameraWorker:
                         if hub.wants(self.camera_id):
                             hub.publish(self.camera_id, frame)
 
-                        output_frame = self.logic.process(frame)
+                        # The reader thread may overwrite `frame` while we draw on it,
+                        # so work on our own copy.
+                        output_frame = self.logic.process(frame.copy())
                         self.last_frame_time = datetime.now()
 
                         if self.recorder is not None:
@@ -154,12 +210,15 @@ class CameraWorker:
                                 stop = True
                                 break
                 finally:
+                    reader.close()
                     cap.release()
 
                 if not stop:
                     time.sleep(RETRY_SECONDS)
 
         finally:
+            self.logic.tracker.stop()
+
             # 'q' pressed or an error: also close open rows (does nothing if the
             # stream-loss branch already did).
             self._close_open_rows()
