@@ -5,7 +5,7 @@ const Home = () => {
   const router = useRouter();
 
   useEffect(() => {
-    router.push("/auth/login");
+    router.push("/overview");
   }, [router]);
 
   return null;

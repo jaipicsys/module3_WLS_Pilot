@@ -1,169 +1,101 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React from "react";
 import { Box, Grid } from "@mui/material";
 import Inventory2Outlined from "@mui/icons-material/Inventory2Outlined";
 import AccessTimeOutlined from "@mui/icons-material/AccessTimeOutlined";
 import PauseCircleOutlineOutlined from "@mui/icons-material/PauseCircleOutlineOutlined";
-import GpsFixedOutlined from "@mui/icons-material/GpsFixed";
-import ChecklistRtlIcon from "@mui/icons-material/ChecklistRtl";
-import { TbPackageExport } from "react-icons/tb";
 import DonutLargeIcon from "@mui/icons-material/DonutLarge";
+import { TbPackageExport } from "react-icons/tb";
 import Header from "../../Layout/Header/Header";
-import { getKpiCards } from "../../../utils/api";
 import KpiCard from "./Kpicard/Kpicard";
 import OutputTrend from "./Outputtrend/Outputtrend";
-import TimeDistribution from "./Timedistribution/Timedistribution";
-import LiveFeed from "./Livefeed/Livefeed";
+import LiveCameraFeed from "./Livecamerafeed/Livecamerafeed";
 import OutputByProduct from "./Outputbyproduct/Outputbyproduct";
 import TopOperators from "./Topoperators/Topoperators";
 import LossBreakdown from "./Lossbreakdown/Lossbreakdown";
-import RecentEvents from "./Recentevents/Recentevents";
 import AlertsNotifications from "./Alertsnotifications/Alertsnotifications";
-import LiveCameraFeed from "./Livecamerafeed/Livecamerafeed";
 
-/* Turn a change percentage into { delta, trend } for KpiCard */
-const change = (pct) => ({
-  delta: `${Math.abs(pct ?? 0)}%`,
-  trend: pct > 0 ? "up" : pct < 0 ? "down" : null,
-});
-
-/* Only show a change when the API actually sends one */
-const changeOf = (card) =>
-  card && card.change_pct != null ? change(card.change_pct) : {};
+/* Static KPI data */
+const KPIS = [
+  {
+    label: "Total Output",
+    value: "43",
+    delta: "12%",
+    trend: "up",
+    sub: "vs. previous shift",
+    icon: <Inventory2Outlined />,
+  },
+  {
+    label: "Throughput",
+    value: "86",
+    delta: "4%",
+    trend: "up",
+    sub: "units/hour",
+    icon: <TbPackageExport fontSize={24} />,
+  },
+  {
+    label: "Productive Time",
+    value: "2h 34m",
+    delta: "78%",
+    trend: null,
+    sub: "of available time",
+    icon: <AccessTimeOutlined />,
+  },
+  {
+    label: "Utilization",
+    value: "73.5%",
+    sub: "productive time / total operator time",
+    icon: <DonutLargeIcon />,
+  },
+  {
+    label: "Idle / Waiting Time",
+    value: "0h 26m",
+    delta: "22%",
+    trend: null,
+    sub: "of available time",
+    icon: <PauseCircleOutlineOutlined />,
+  },
+];
 
 const Overview = () => {
-  const [kpi, setKpi] = useState(null);
-  const [mode, setMode] = useState("live"); // "live" | "recorded", set by the header
-
-  /* Fetch KPI cards immediately, then poll every 10 seconds (restarts on mode change) */
-  useEffect(() => {
-    let intervalId;
-    let active = true;
-
-    setKpi(null); // don't show the other mode's numbers while loading
-
-    const loadData = async () => {
-      try {
-        const data = await getKpiCards(mode);
-        if (active) setKpi(data);
-      } catch (err) {
-        console.error("Failed to fetch KPI cards:", err);
-      }
-    };
-
-    loadData();
-    intervalId = setInterval(loadData, 10000);
-
-    return () => {
-      active = false;
-      clearInterval(intervalId);
-    };
-  }, [mode]);
-
-  /* Map the API response onto the cards */
-  const kpis = useMemo(() => {
-    const d = kpi || {};
-
-    return [
-      {
-        label: "Total Output",
-        value: d.total_output
-          ? Number(d.total_output.value).toLocaleString()
-          : "—",
-        ...changeOf(d.total_output),
-        sub: "vs. previous shift",
-        icon: <Inventory2Outlined />,
-      },
-      {
-        label: "Throughput",
-        value: d.output_per_hour
-          ? Number(d.output_per_hour.value).toLocaleString()
-          : "—",
-        ...changeOf(d.output_per_hour),
-        sub: "units/hour",
-        icon: <TbPackageExport fontSize={24} />,
-      },
-      {
-        label: "Productive Time",
-        value: d.productive_time?.display ?? "—",
-        delta: d.productive_time
-          ? `${d.productive_time.pct_of_available}%`
-          : undefined,
-        trend: null,
-        sub: "of available time",
-        icon: <AccessTimeOutlined />,
-      },
-      {
-        label: "Utilization",
-        value: d.productive_time
-          ? `${d.productive_time.pct_of_available}%`
-          : "—",
-        sub: "productive time / total operator time",
-        icon: <DonutLargeIcon />,
-      },
-      {
-        label: "Idle / Waiting Time",
-        value: d.idle_time?.display ?? "—",
-        delta: d.idle_time ? `${d.idle_time.pct_of_available}%` : undefined,
-        trend: null,
-        sub: "of available time",
-        icon: <PauseCircleOutlineOutlined />,
-      },
-    ];
-  }, [kpi]);
-
   return (
     <>
       <Header
         title="Plant Overview"
         description="Real-time visibility into towel packing operations, productivity and performance."
-        mode={mode}
-        onModeChange={setMode}
       />
 
       <Box sx={{ p: { xs: 1.5, md: 2.5 } }}>
         <Grid container spacing={2}>
           {/* Row 1 — KPI cards */}
-          {kpis.map((k) => (
+          {KPIS.map((k) => (
             <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2 }} key={k.label}>
               <KpiCard {...k} />
             </Grid>
           ))}
 
-          {/* Row 2 — trend / distribution / live feed */}
+          {/* Row 2 — trend / live camera */}
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
-            <OutputTrend mode={mode} />
+            <OutputTrend />
           </Grid>
 
-          {/* <Grid size={{ xs: 12, md: 6, lg: 3 }}>
-            <TimeDistribution
-              data={timeRows}
-              centerValue={availableTime}
-              centerLabel="Available Time"
-            />
-          </Grid> */}
-
           <Grid size={{ xs: 12, md: 12, lg: 6 }}>
-            <LiveCameraFeed mode={mode} />
+            <LiveCameraFeed />
           </Grid>
 
           {/* Row 3 — product / operators / loss */}
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
-            <OutputByProduct mode={mode} />
+            <OutputByProduct />
           </Grid>
 
           <Grid size={{ xs: 12, md: 6, lg: 6 }}>
-            <TopOperators mode={mode} />
+            <TopOperators />
           </Grid>
 
           <Grid size={{ xs: 12, md: 12, lg: 6 }}>
-            <LossBreakdown mode={mode} />
+            <LossBreakdown />
           </Grid>
 
-          {/* Row 4 — events / alerts */}
-          {/* <Grid size={{ xs: 12, lg: 7 }}>
-            <RecentEvents />
-          </Grid> */}
-
+          {/* Row 4 — alerts */}
           <Grid size={{ xs: 12, lg: 6 }}>
             <AlertsNotifications />
           </Grid>

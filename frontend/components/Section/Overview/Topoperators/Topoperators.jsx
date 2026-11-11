@@ -1,59 +1,27 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import {
   Table,
   TableHead,
   TableBody,
   TableRow,
   TableCell,
-  Typography,
 } from "@mui/material";
 import Panel from "../Panel/Panel";
 import useDashboardColors from "../Tokens/Tokens";
-import { getTopOperators } from "../../../../utils/api";
 
-/*
- * Loads from the API and refreshes every 10 seconds.
- * Pass `data` ([{ id, active, idle, away, util }]) to override the API.
- */
-export default function TopOperators({ data, mode = "live", onViewAll }) {
+/* Static operator rows */
+const ROWS = [
+  { id: "OP7", active: "29m 42s", idle: "0s", away: "11s", util: "99%" },
+  { id: "OP6", active: "29m 31s", idle: "0s", away: "22s", util: "99%" },
+  { id: "OP5", active: "24m 11s", idle: "2m 2s", away: "3m 41s", util: "81%" },
+  { id: "OP4", active: "20m 26s", idle: "6m 28s", away: "2m 59s", util: "68%" },
+  { id: "OP3", active: "17m 14s", idle: "3m 57s", away: "8m 37s", util: "58%" },
+  { id: "OP1", active: "16m 51s", idle: "4m 58s", away: "8m 2s", util: "57%" },
+  { id: "OP2", active: "15m 53s", idle: "8m 31s", away: "5m 28s", util: "53%" },
+];
+
+export default function TopOperators({ onViewAll }) {
   const c = useDashboardColors();
-  const [rows, setRows] = useState([]);
-
-  useEffect(() => {
-    if (data) return undefined;
-
-    let active = true;
-    setRows([]); // clear the other mode's data
-
-    const load = async () => {
-      try {
-        const res = await getTopOperators(mode);
-        if (active) {
-          setRows(
-            (res.operators || []).map((o) => ({
-              id: o.operator_id,
-              active: o.active_display,
-              idle: o.idle_display,
-              away: o.away_display,
-              util: `${Math.round(o.utilization_pct)}%`,
-            })),
-          );
-        }
-      } catch (err) {
-        console.error("Failed to fetch top operators:", err);
-      }
-    };
-
-    load();
-    const intervalId = setInterval(load, 10000);
-
-    return () => {
-      active = false;
-      clearInterval(intervalId);
-    };
-  }, [data, mode]);
-
-  const list = data ?? rows;
 
   const headCell = {
     fontSize: 11.5,
@@ -70,11 +38,7 @@ export default function TopOperators({ data, mode = "live", onViewAll }) {
   };
 
   return (
-    <Panel
-      title="Top Operators"
-      action="View All"
-      onActionClick={onViewAll}
-    >
+    <Panel title="Top Operators" action="View All" onActionClick={onViewAll}>
       <Table size="small" sx={{ "& td, & th": { px: 1 } }}>
         <TableHead>
           <TableRow>
@@ -95,7 +59,7 @@ export default function TopOperators({ data, mode = "live", onViewAll }) {
           </TableRow>
         </TableHead>
         <TableBody>
-          {list.map((row, i) => (
+          {ROWS.map((row, i) => (
             <TableRow key={row.id} hover>
               <TableCell sx={{ ...bodyCell, color: c.muted }}>
                 {i + 1}

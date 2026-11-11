@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { Box, Typography } from "@mui/material";
 import {
   ComposedChart,
@@ -13,7 +13,17 @@ import {
 } from "recharts";
 import Panel from "../Panel/Panel";
 import useDashboardColors from "../Tokens/Tokens";
-import { getOutputTrend } from "../../../../utils/api";
+
+/* Static output per 5 minutes */
+const CHART_DATA = [
+  { time: "11:00 AM", output: 7 },
+  { time: "11:05 AM", output: 7 },
+  { time: "11:10 AM", output: 10 },
+  { time: "11:15 AM", output: 8 },
+  { time: "11:20 AM", output: 7 },
+  { time: "11:25 AM", output: 3 },
+  { time: "11:30 AM", output: 1 },
+];
 
 function LegendDot({ color, dashed, label, c }) {
   return (
@@ -40,50 +50,12 @@ function LegendDot({ color, dashed, label, c }) {
   );
 }
 
-/*
- * Output per 5 minutes. Loads from the API and refreshes every 10 seconds.
- * Pass `data` ([{ time, output, target }]) to override the API.
- */
-export default function OutputTrend({ data, mode = "live", height = 300 }) {
+/* Output per 5 minutes (static data). */
+export default function OutputTrend({ height = 300 }) {
   const c = useDashboardColors();
-  const [series, setSeries] = useState([]);
-
-  useEffect(() => {
-    if (data) return undefined;
-
-    let active = true;
-    setSeries([]); // clear the other mode's data
-
-    const load = async () => {
-      try {
-        const res = await getOutputTrend(mode);
-        if (active) {
-          setSeries(
-            (res.series || []).map((p) => ({
-              time: p.label,
-              output: p.output,
-              target: p.target,
-            })),
-          );
-        }
-      } catch (err) {
-        console.error("Failed to fetch output trend:", err);
-      }
-    };
-
-    load();
-    const intervalId = setInterval(load, 10000);
-
-    return () => {
-      active = false;
-      clearInterval(intervalId);
-    };
-  }, [data, mode]);
-
-  const chartData = data ?? series;
 
   // Show every label for short ranges; thin them out when there are many bars.
-  const tickInterval = Math.max(0, Math.ceil(chartData.length / 8) - 1);
+  const tickInterval = Math.max(0, Math.ceil(CHART_DATA.length / 8) - 1);
 
   return (
     <Panel
@@ -98,7 +70,7 @@ export default function OutputTrend({ data, mode = "live", height = 300 }) {
     >
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart
-          data={chartData}
+          data={CHART_DATA}
           margin={{ top: 20, right: 8, left: -8, bottom: 0 }}
         >
           <CartesianGrid
@@ -145,7 +117,7 @@ export default function OutputTrend({ data, mode = "live", height = 300 }) {
             name="Output"
             fill={c.accent}
             radius={[3, 3, 0, 0]}
-            barSize={64}
+            barSize={40}
             isAnimationActive={false}
           >
             <LabelList

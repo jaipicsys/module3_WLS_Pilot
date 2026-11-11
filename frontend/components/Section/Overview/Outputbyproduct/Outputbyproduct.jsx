@@ -1,55 +1,26 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { Box, Typography } from "@mui/material";
 import Panel from "../Panel/Panel";
 import useDashboardColors, { barShades } from "../Tokens/Tokens";
-import { getOutputByProduct } from "../../../../utils/api";
 
-/*
- * Output per product. Loads from the API and refreshes every 10 seconds.
- * Pass `data` ([{ label, value }]) to override the API.
- */
-export default function OutputByProduct({ data, mode = "live" }) {
+/* Static output per product */
+const ROWS = [
+  { label: "Towel-Standard", value: 11 },
+  { label: "Towel – Premium", value: 6 },
+  { label: "Hand Towel", value: 4 },
+  { label: "Bath Towel", value: 18 },
+  { label: "Others", value: 4 },
+];
+
+export default function OutputByProduct() {
   const c = useDashboardColors();
-  const [rows, setRows] = useState([]);
 
-  useEffect(() => {
-    if (data) return undefined;
-
-    let active = true;
-    setRows([]); // clear the other mode's data
-
-    const load = async () => {
-      try {
-        const res = await getOutputByProduct(mode);
-        if (active) {
-          setRows(
-            (res.products || []).map((p) => ({
-              label: p.name,
-              value: p.value,
-            })),
-          );
-        }
-      } catch (err) {
-        console.error("Failed to fetch output by product:", err);
-      }
-    };
-
-    load();
-    const intervalId = setInterval(load, 10000);
-
-    return () => {
-      active = false;
-      clearInterval(intervalId);
-    };
-  }, [data, mode]);
-
-  const list = data ?? rows;
-  const max = Math.max(...list.map((d) => d.value), 1);
+  const max = Math.max(...ROWS.map((d) => d.value), 1);
 
   return (
     <Panel title="Output by Product">
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1.75 }}>
-        {list.map((row, i) => {
+        {ROWS.map((row, i) => {
           const isOther = row.label.toLowerCase().startsWith("other");
           const color = isOther
             ? c.gray
