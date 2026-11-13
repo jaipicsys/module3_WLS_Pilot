@@ -49,7 +49,8 @@ class PersonTracker:
         cfg = CONFIG.get("tracking", {})
         self.camera_id = camera_id
         self.device = device
-        self.half = half
+        # Match the independent script: YOLO inference uses FP32.
+        self.half = False
 
         # Station ROI: only people inside it are tracked / get P-IDs.
         self.roi = None
@@ -164,19 +165,33 @@ class PersonTracker:
         else:
             boxes, lids, confs = np.zeros((0, 4), np.float32), [], np.zeros(0)
 
-        # People outside the station ROI are ignored: no P-ID, no gallery, no slot used.
-        if self.roi is not None and len(lids):
-            keep = [i for i, bx in enumerate(boxes) if self._in_roi(bx)]
-            boxes, confs = boxes[keep], confs[keep]
-            lids = [lids[i] for i in keep]
-
-        results = self.mgr.update(
+        # Mirror the independent script: all detected people reach GlobalIDManager.
+        # Apply Station ROI only to the returned tracks used by station/operator logic.
+        all_results = self.mgr.update(
             self.frame_idx, lids, boxes, confs, lambda bx: self.encoder(frame, bx)
         )
         self.frame_idx += 1
 
-        return [
-            {"gid": int(gid), "lid": int(lid), "state": state, "box": box,
-             "conf": float(cf), "app_dist": float(d)}
-            for (lid, gid, state, d), box, cf in zip(results, boxes, confs)
-        ]
+        visible = []
+        for (lid, gid, state, d), box, cf in zip(all_results, boxes, confs):
+            if self.roi is not None and not self._in_roi(box):
+                continue
+            visible.append(
+                {"gid": int(gid), "lid": int(lid), "state": state, "box": box,
+                 "conf": float(cf), "app_dist": float(d)}
+            )
+        return visible
+
+    def set_source_fps(self, fps):
+        """Use the same source-FPS rule as the standalone script."""
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError):
+            fps = 0.0
+        if not 1 <= fps <= 120:
+            fps = 25.0
+        self.fps = fps
+        self.auto_fps = False
+        tp.write_tracker_yaml(self.yaml_path, self.args, self.fps)
+        if self.mgr is not None:
+            self.mgr.fps = self.fps

@@ -16,6 +16,7 @@ from config_utils import CONFIG
 from frame_hub import hub
 from logics import FrameLogic, OperatorState, _cam_number
 from video_recorder import VideoRecorder
+import track_people_osnet_frozen as tp
 
 RETRY_SECONDS = CONFIG.get("rtsp_retry_seconds", 3)
 RECORD_VIDEO = CONFIG.get("record_video", False)
@@ -112,18 +113,23 @@ class CameraWorker:
 
         try:
             while not stop:
-                cap = cv2.VideoCapture(self.rtsp_url)
-
-                if not cap.isOpened():
-                    cap.release()
+                try:
+                    # Same background latest-frame reader as the independent tracker.
+                    cap = tp.RTSPReader(self.rtsp_url)
+                except Exception as exc:
                     print(
-                        f"[WARNING] {self.camera_id} not connected. "
+                        f"[WARNING] {self.camera_id} not connected ({exc}). "
                         f"Retrying in {RETRY_SECONDS}s..."
                     )
                     time.sleep(RETRY_SECONDS)
                     continue
 
-                print(f"[INFO] {self.camera_id} connected.")
+                source_fps = cap.get(cv2.CAP_PROP_FPS)
+                self.logic.tracker.set_source_fps(source_fps)
+                print(
+                    f"[INFO] {self.camera_id} connected "
+                    f"(source FPS={self.logic.tracker.fps:.2f}, latest-frame reader)."
+                )
 
                 try:
                     while True:

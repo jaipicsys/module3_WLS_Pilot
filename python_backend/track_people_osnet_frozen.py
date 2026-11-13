@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
-VERSION 2 — OSNET, NO NEW LEARNING: each person is learnt during their first 60 s of clean visibility, then locked.
+OSNET v2 — based on the OSNet-frozen version that worked best (run 20261111_140911).
+Changes in v2 (everything else is identical):
+  * every ID change is still decided by appearance (OSNet distance); thresholds are in the
+    settings block and lowered: ASSIGN 0.22 (was 0.28), BACK 0.30 (was 0.35)
+  * debug overlay in the video: per box the appearance distance to its own ID and to the next
+    closest ID, detection confidence, a side table P1..P7, and the REASON for every ID change
+  * P2->P4 fix: a track that has carried its ID since that person first appeared is only moved
+    if its OWN appearance match is poor (> BACK) and another ID is better by >= 0.12; partly
+    hidden boxes (< 80 % of the person's usual height) are not used for appearance checks
+  * location tie-break: an ID lost long ago no longer gets an advantage over one lost just now
 
 track_people.py — person tracking with stable IDs through occlusion, pose change,
 short detection loss, and exit/re-entry.
@@ -44,22 +53,29 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 # =========================================================================== #
 # INPUT CONFIG — edit here (command-line --source / --weights still override)
 # =========================================================================== #
-RTSP_SOURCE = "rtsp://192.168.2.22:8554/cam1"
+RTSP_SOURCE = "rtsp://192.168.2.218:8554/cam1"
 VIDEO_SOURCE = "/home/yasmin/EigenState/Excavator/tracking/input/packing.mp4"
 USE_RTSP = True  # True -> RTSP_SOURCE, False -> VIDEO_SOURCE
 SOURCE = RTSP_SOURCE if USE_RTSP else VIDEO_SOURCE
-WEIGHTS = "/home/yasmin/EigenState/Excavator/tracking/person.pt"
+WEIGHTS = "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt"
 MAX_IDS = 7  # total people that can ever appear (closed set)
 # Step 4 appearance model. First file that exists is used: the OSNet .pt weights run in PyTorch
 # (no extra installs), or the .onnx made by export_osnet.py (needs onnxruntime). If neither exists
 # -> torchvision ResNet50. Set REID_MODEL = None to force ResNet50.
-REID_CANDIDATES = ["/home/yasmin/EigenState/Excavator/tracking/osnet_x1_0_msmt17.pt",
-                   "/home/yasmin/EigenState/Excavator/tracking/osnet_x1_0_msmt17.onnx"]
+REID_CANDIDATES = ["/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
+                   "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.onnx"]
 REID_MODEL = next((p for p in REID_CANDIDATES if os.path.exists(p)), None)
 GALLERY_MODE = "frozen"  # "rolling" = keep learning (verified samples only), "frozen" = learn first 60 s then lock
 GALLERY_SIZE = 40
+# Appearance thresholds = OSNet distance (0 = identical look, higher = different), 1 - cosine
+# similarity to the person's stored views (mean of the 3 best). Correct matches here: ~0.10-0.23.
+ASSIGN_APP_MAX = 0.22  # give / re-link an ID only if the distance to it is <= this
+KEEP_DIST = 0.30  # a track that just lost its ID may go back to that same ID if <= this
+UNLABEL_DIST = 0.45  # remove a label only if the distance to its own ID stays above this
+DEBUG_OVERLAY = True  # draw distances, confidences and switch reasons on the video
 OUT_DIR = "tracking/output_osnet_frozen"
 import queue
+import re
 import signal
 import threading
 import time
@@ -268,6 +284,11 @@ class Person:
     reassigns: int = 0
     history: deque = field(default_factory=lambda: deque(maxlen=7))  # recent verification verdicts
     frozen: bool = False  # gallery + usual station locked after the learning window
+    bind_frame: int = 0  # when the current track got this ID
+    bind_how: str = ""  # new / relink / move / swap
+    heights: deque = field(default_factory=lambda: deque(maxlen=300))  # recent box heights
+    last_check: tuple | None = None  # (frame, own dist, next closest gid, its dist) for the overlay
+    last_d: tuple | None = None  # (frame, own dist) from the latest embedding of this person
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -288,6 +309,7 @@ class Pending:
     frames: int = 0
     last_seen: int = 0
     was_gid: int | None = None  # set when this track lost its ID: it may only go back to an existing ID
+    near: tuple | None = None  # (nearest gid, dist, holder track or None) for the overlay
 
 
 class GlobalIDManager:
@@ -373,6 +395,8 @@ class GlobalIDManager:
         p.local_id, p.last_box, p.last_frame = lid, box.copy(), frame_idx
         p.exited = False
         p.history.clear()
+        p.bind_frame = frame_idx
+        p.bind_how = ""
 
     def new_person(self, pend: Pending, box, frame_idx) -> Person:
         p = Person(gid=self.next_gid, first_frame=pend.first_frame, last_frame=frame_idx, last_box=box.copy())
@@ -419,12 +443,14 @@ class GlobalIDManager:
                 p.path_px += float(np.linalg.norm(foot(box) - foot(p.last_box)))
                 p.last_box, p.last_frame, p.local_id = box.copy(), frame_idx, lid
                 p.frames_seen += 1
+                p.heights.append(float(box[3] - box[1]))
                 self.maybe_freeze(p, frame_idx)
                 self.update_home(p, box)
                 linked_idx[p.gid] = i
                 d = -1.0
                 if embs.get(i) is not None:
                     d = p.appearance_dist(embs[i])
+                    p.last_d = (frame_idx, d)
                     if d < self.a.gallery_accept_dist and all(v == "ok" for v in p.history):
                         self.add_to_gallery(p, embs[i], frame_idx)  # no-op once frozen
                 out[i] = (lid, p.gid, "tracked", d)
@@ -471,7 +497,7 @@ class GlobalIDManager:
             sp = 0.0 if self.near_edge(start_box) else self.a.no_edge_penalty
         else:
             dist = np.linalg.norm(foot(start_box) - foot(p.last_box)) / self.diag
-            radius = min(1.0, self.a.spatial_radius + self.a.walk_speed * gap_s)
+            radius = min(self.a.max_radius, self.a.spatial_radius + self.a.walk_speed * gap_s)  # capped: long-lost IDs get no advantage
             sp = self.a.spatial_weight * min(dist / radius, 1.0)
         hm = 0.0
         if p.home is not None:
@@ -525,6 +551,7 @@ class GlobalIDManager:
                     self.add_to_gallery(p, e, frame_idx)
                 how = "back" if p.gid == pend.was_gid else ("re-entry" if p.exited else "occlusion/miss")
                 self.bind(p, lid, boxes[i], frame_idx)
+                p.bind_how = "relink"
                 self.log(frame_idx, f"RELINK track {lid} -> P{p.gid} ({how}) gap={gap_s:.1f}s "
                                     f"app_dist={app:.2f} prior={prior:.2f}")
                 out[i] = (lid, p.gid, "relinked", app)
@@ -535,11 +562,14 @@ class GlobalIDManager:
                 del self.pending[lid]
                 p = self.new_person(pend, boxes[i], frame_idx)
                 self.bind(p, lid, boxes[i], frame_idx)
+                p.bind_how = "new"
                 txt = f" (nearest P{near[0][0]} dist={near[0][1]:.2f})" if near else ""
                 self.log(frame_idx, f"NEW P{p.gid} from track {lid}{txt}"
                                     + (f"  [all {self.a.max_ids} IDs now created]" if self.full else ""))
                 out[i] = (lid, p.gid, "new", -1.0)
             else:
+                if near:
+                    pend.near = (near[0][0], near[0][1], self.people[near[0][0]].local_id)
                 if pend.frames == self.a.confirm_frames or pend.frames % int(self.fps * 10) == 0:
                     if near:
                         g, dd = near[0]
@@ -589,7 +619,10 @@ class GlobalIDManager:
         learn_frames = self.a.verify_after_s * self.fps
         dists, verdicts = {}, {}
         for gid, i in linked_idx.items():
-            if gid in mature and embs.get(i) is not None:
+            h = boxes[i][3] - boxes[i][1]
+            ph = self.people[gid].heights
+            partial = len(ph) >= 30 and h < self.a.partial_h_ratio * float(np.median(ph))
+            if gid in mature and embs.get(i) is not None and not partial:  # full, clean views only
                 dists[gid] = {g: q.appearance_dist(embs[i]) for g, q in mature.items()}
         for gid, D in dists.items():
             p = self.people[gid]
@@ -598,7 +631,13 @@ class GlobalIDManager:
             own = D[gid]
             others = {g: d for g, d in D.items() if g != gid and self.people[g].frames_seen >= learn_frames}
             alt_g, alt_d = min(others.items(), key=lambda kv: kv[1]) if others else (None, 9.0)
-            if alt_g is not None and alt_d <= self.a.assign_app_max and alt_d < own - self.a.verify_margin:
+            p.last_check = (frame_idx, own, alt_g, alt_d)
+            # the track that has carried this ID since the person first appeared needs much stronger
+            # evidence: its OWN match must really be poor, not just a bit worse than another ID's
+            stable = p.bind_how == "new" and frame_idx - p.bind_frame >= self.a.stable_s * self.fps
+            margin = self.a.stable_margin if stable else self.a.verify_margin
+            if (alt_g is not None and alt_d <= self.a.assign_app_max and alt_d < own - margin
+                    and (not stable or own > self.a.keep_dist)):
                 v = f"move:{alt_g}"
             elif own > self.a.unlabel_dist:
                 v = "bad"
@@ -626,6 +665,7 @@ class GlobalIDManager:
                     p.reassigns += 1
                     q.reassigns += 1
                     self.bind(q, lid, boxes[i], frame_idx)
+                    q.bind_how = "move"
                     self.log(frame_idx, f"MOVE track {lid}: P{gid} -> P{alt_g} ({why})")
                     out[i] = (lid, alt_g, "reassigned", alt_d)
                     del linked_idx[gid]
@@ -643,6 +683,8 @@ class GlobalIDManager:
                         q.history.clear()
                         p.reassigns += 1
                         q.reassigns += 1
+                        p.bind_frame = q.bind_frame = frame_idx
+                        p.bind_how = q.bind_how = "swap"
                         self.log(frame_idx, f"SWAP P{gid}<->P{alt_g} (tracks {lid},{lid2}): "
                                             f"straight={own + D2[alt_g]:.2f} crossed={alt_d + D2[gid]:.2f}")
                         out[i] = (lid, alt_g, "swapped", alt_d)
@@ -731,6 +773,79 @@ def write_tracker_yaml(path: Path, args, fps: float):
 
 
 # --------------------------------------------------------------------------- #
+# Debug overlay
+# --------------------------------------------------------------------------- #
+EVENT_SHOW_FRAMES = 45  # how long a switch reason stays under the box (3 s at 15 fps)
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+def _text(img, txt, org, scale=0.5, color=(255, 255, 255), thick=1, bg=(0, 0, 0)):
+    (tw, th), base = cv2.getTextSize(txt, _FONT, scale, thick)
+    x, y = int(org[0]), int(org[1])
+    cv2.rectangle(img, (x - 2, y - th - 3), (x + tw + 2, y + base), bg, -1)
+    cv2.putText(img, txt, (x, y), _FONT, scale, color, thick, cv2.LINE_AA)
+    return th + base + 4
+
+
+def _fmt_d(d):
+    return f"{d:.2f}" if d is not None and d >= 0 else "--"
+
+
+def draw_debug(vis, fi, results, boxes, confs, mgr, args, track_events, recent_events):
+    """Per box: ID, appearance distance to its own ID and to the next closest ID, detection conf,
+    and the reason of any ID change in the last 3 s. Side table P1..P7. Recent events panel."""
+    H, W = vis.shape[:2]
+    stale = int(2 * mgr.fps)
+    for (lid, gid, state, d), box, cf in zip(results, boxes, confs):
+        x1, y1, x2, y2 = [int(v) for v in box]
+        lines = []
+        if gid > 0:
+            p = mgr.people[gid]
+            lc = p.last_check if p.last_check and fi - p.last_check[0] <= stale else None
+            ld = p.last_d if p.last_d and fi - p.last_d[0] <= stale else None
+            own = lc[1] if lc else (ld[1] if ld else None)
+            ok = own is not None and own <= args.assign_app_max
+            lines.append((f"d(P{gid})={_fmt_d(own)}  conf={cf:.2f}", (0, 255, 0) if ok else (0, 200, 255)))
+            if lc and lc[2] is not None:
+                lines.append((f"next P{lc[2]}={_fmt_d(lc[3])}", (200, 200, 200)))
+        else:
+            pend = mgr.pending.get(lid)
+            if pend is not None and pend.near:
+                g, dd, holder = pend.near
+                who = f"held t{holder}" if holder is not None else "free"
+                lines.append((f"? nearest P{g}={_fmt_d(dd)} ({who}) conf={cf:.2f}", (0, 200, 255)))
+                lines.append((f"needs <= {args.assign_app_max:.2f} to get an ID", (180, 180, 180)))
+            else:
+                lines.append((f"? waiting ({state}) conf={cf:.2f}", (180, 180, 180)))
+        ev = track_events.get(lid)
+        if ev and fi - ev[0] <= EVENT_SHOW_FRAMES:
+            msg = ev[1]
+            lines.append((msg[:58], (0, 255, 255)))
+            if len(msg) > 58:
+                lines.append((msg[58:116], (0, 255, 255)))
+        y = min(y2 + 16, H - 6 * 16)
+        for txt, colr in lines:
+            y += _text(vis, txt, (x1, y), 0.45, colr)
+
+    # side table: one row per person
+    hdr = f"ID  track  d(own)  next   | assign<={args.assign_app_max:.2f} unlabel>{args.unlabel_dist:.2f}"
+    x0, y = W - cv2.getTextSize(hdr, _FONT, 0.45, 1)[0][0] - 12, 60
+    y += _text(vis, hdr, (x0, y), 0.45, (255, 255, 255))
+    for g in sorted(mgr.people):
+        p = mgr.people[g]
+        lc = p.last_check if p.last_check and fi - p.last_check[0] <= stale else None
+        ld = p.last_d if p.last_d and fi - p.last_d[0] <= stale else None
+        own = lc[1] if lc else (ld[1] if ld else None)
+        trk = f"t{p.local_id}" if p.local_id is not None else "lost"
+        nxt = f"P{lc[2]}={_fmt_d(lc[3])}" if lc and lc[2] is not None else ""
+        y += _text(vis, f"P{g:<2} {trk:>6}  {_fmt_d(own):>5}  {nxt}", (x0, y), 0.45, color_for(g))
+    # recent events panel
+    y = H - 10 - 18 * len(recent_events)
+    for f, msg in recent_events:
+        y += _text(vis, f"[{f}] {msg[:120]}", (10, y), 0.45, (0, 255, 255))
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def parse_args():
@@ -754,13 +869,13 @@ def parse_args():
     ap.add_argument("--confirm-min-conf", type=float, default=0.6, help="median det conf needed to confirm a track")
     # appearance thresholds (1 - cosine sim to a person's gallery, top-3 mean). Calibrated on the
     # 152223 run: correct IDs median 0.13 / 99% < 0.30; wrong IDs 0.27-0.42. Recheck per model.
-    ap.add_argument("--assign-app-max", type=float, default=0.28,
+    ap.add_argument("--assign-app-max", type=float, default=ASSIGN_APP_MAX,
                     help="an ID is only given if appearance alone is below this (location only breaks ties)")
     ap.add_argument("--rank-margin", type=float, default=0.02,
                     help="skip a free ID if a person already on screen looks closer by more than this")
-    ap.add_argument("--keep-dist", type=float, default=0.35,
+    ap.add_argument("--keep-dist", type=float, default=KEEP_DIST,
                     help="a track that just lost its ID may go back to that same ID below this")
-    ap.add_argument("--unlabel-dist", type=float, default=0.45,
+    ap.add_argument("--unlabel-dist", type=float, default=UNLABEL_DIST,
                     help="remove a label only if own distance stays above this (big drift / different person)")
     ap.add_argument("--new-id-min-dist", type=float, default=0.30,
                     help="new P-ID only if the person is at least this far from ALL known people")
@@ -785,6 +900,13 @@ def parse_args():
     ap.add_argument("--spatial-radius", type=float, default=0.08, help="fraction of diagonal")
     ap.add_argument("--walk-speed", type=float, default=0.10, help="diag fraction per second")
     ap.add_argument("--spatial-weight", type=float, default=0.15)
+    ap.add_argument("--max-radius", type=float, default=0.25, help="cap of the search radius (diag fraction)")
+    ap.add_argument("--stable-s", type=float, default=60,
+                    help="a track holding the ID it got when the person first appeared for this long is 'stable' ...")
+    ap.add_argument("--stable-margin", type=float, default=0.12,
+                    help="... and is only moved if its own distance > keep_dist AND another ID is better by this")
+    ap.add_argument("--partial-h-ratio", type=float, default=0.8,
+                    help="no appearance check when the box is shorter than this x the person's usual height")
     ap.add_argument("--no-edge-penalty", type=float, default=0.08)
     ap.add_argument("--lost-after-frames", type=int, default=2)
     ap.add_argument("--home-weight", type=float, default=0.08, help="usual-station prior weight")
@@ -832,14 +954,25 @@ def main():
 
     writer = cv2.VideoWriter(str(out_dir / f"{stem}_tracked.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
     tracks_f = open(out_dir / f"{stem}_tracks.txt", "w")
-    tracks_f.write("frame,time_s,global_id,track_id,state,x1,y1,x2,y2,w,h,cx,cy,foot_x,foot_y,conf,app_dist\n")
+    tracks_f.write("frame,time_s,global_id,track_id,state,x1,y1,x2,y2,w,h,cx,cy,foot_x,foot_y,conf,app_dist,"
+                   "next_id,next_dist\n")
     events_f = open(out_dir / f"{stem}_events.txt", "w")
+
+    track_events: dict[int, tuple] = {}  # track id -> (frame, reason) for the overlay
+    recent_events: deque = deque(maxlen=6)
 
     def log(fi, msg):
         line = f"[frame {fi:6d} | {fi / fps:8.2f}s] {msg}"
         events_f.write(line + "\n")
         events_f.flush()
         print(line)
+        if msg.split()[0] in ("NEW", "RELINK", "MOVE", "SWAP", "UNLABEL", "UNKNOWN"):
+            recent_events.append((fi, msg))
+            m = re.search(r"tracks? (\d+)(?:,(\d+))?", msg)
+            if m:
+                for t in m.groups():
+                    if t:
+                        track_events[int(t)] = (fi, msg)
 
     mgr = GlobalIDManager(fps, W, H, args, log)
     trails: dict[int, deque] = {}
@@ -850,7 +983,8 @@ def main():
     log(0, f"source={args.source} {W}x{H}@{fps:.1f}fps tracker_yaml={yaml_path}")
     log(0, f"reid={args.reid_model or type(encoder).__name__} gallery={args.gallery_mode} "
            f"assign_app_max={args.assign_app_max} keep_dist={args.keep_dist} unlabel_dist={args.unlabel_dist} "
-           f"verify={args.verify_votes}/{args.verify_window} learn_s={args.learn_s} verify_after_s={args.verify_after_s}")
+           f"verify={args.verify_votes}/{args.verify_window} learn_s={args.learn_s} verify_after_s={args.verify_after_s} "
+           f"stable={args.stable_s}s/{args.stable_margin} partial_h={args.partial_h_ratio} max_radius={args.max_radius}")
     while ok and not stop["flag"]:
         res = model.track(frame, persist=True, tracker=str(yaml_path), classes=[args.person_class],
                           conf=args.conf, imgsz=args.imgsz, device=args.device, verbose=False)[0]
@@ -869,9 +1003,13 @@ def main():
         for (lid, gid, state, d), box, cf in zip(results, boxes, confs):
             x1, y1, x2, y2 = box
             fx, fy = foot(box)
+            nid, nd = -1, -1.0
+            if gid > 0 and mgr.people[gid].last_check and mgr.people[gid].last_check[0] == fi:
+                _, _, nid, nd = mgr.people[gid].last_check
+                nid = -1 if nid is None else nid
             tracks_f.write(f"{fi},{ts:.3f},{gid},{lid},{state},{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f},"
                            f"{x2 - x1:.1f},{y2 - y1:.1f},{(x1 + x2) / 2:.1f},{(y1 + y2) / 2:.1f},"
-                           f"{fx:.1f},{fy:.1f},{cf:.3f},{d:.3f}\n")
+                           f"{fx:.1f},{fy:.1f},{cf:.3f},{d:.3f},{nid},{nd:.3f}\n")
             col = color_for(gid)
             p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
             cv2.rectangle(vis, p1, p2, col, 2)
@@ -888,6 +1026,8 @@ def main():
             for gid, tr in trails.items():
                 if gid in mgr.people and mgr.people[gid].local_id is not None and len(tr) > 1:
                     cv2.polylines(vis, [np.array(tr, np.int32)], False, color_for(gid), 2)
+        if DEBUG_OVERLAY:
+            draw_debug(vis, fi, results, boxes, confs, mgr, args, track_events, recent_events)
         active = sum(1 for p in mgr.people.values() if p.local_id is not None)
         cv2.putText(vis, f"frame {fi}  t={ts:.1f}s  active={active}  total IDs={len(mgr.people)}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
