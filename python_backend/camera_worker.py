@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from datetime import datetime
 
@@ -131,26 +132,65 @@ class CameraWorker:
                     f"(source FPS={self.logic.tracker.fps:.2f}, latest-frame reader)."
                 )
 
+                n_frames, t_start = 0, time.time()
+                box = {"pair": None, "seq": 0, "lost": False}
+                cond = threading.Condition()
+                stop_evt = threading.Event()
+
+                def track_loop(cap=cap, box=box, cond=cond, stop_evt=stop_evt):
+                    # Tracker sees every frame it can handle, like the standalone script.
+                    while not stop_evt.is_set():
+                        ret, frame = cap.read()
+                        if not ret:
+                            with cond:
+                                box["lost"] = True
+                                cond.notify_all()
+                            return
+                        hub.beat(self.camera_id)
+                        if hub.wants(self.camera_id):
+                            hub.publish(self.camera_id, frame)
+                        try:
+                            tracks = self.logic.tracker.update(frame)
+                        except Exception as exc:
+                            print(f"[ERROR] {self.camera_id} tracker: {exc}")
+                            continue
+                        with cond:
+                            box["pair"] = (frame, tracks)
+                            box["seq"] += 1
+                            cond.notify_all()
+
+                tracker_thread = threading.Thread(
+                    target=track_loop, daemon=True, name=f"track-{self.camera_id}")
+                tracker_thread.start()
+                last_seq = 0
+
                 try:
                     while True:
-                        ret, frame = cap.read()
+                        with cond:
+                            cond.wait_for(
+                                lambda: box["seq"] != last_seq or box["lost"], timeout=10)
+                            lost = box["seq"] == last_seq  # lost stream or timeout
+                            if not lost:
+                                frame, tracks = box["pair"]
+                                last_seq = box["seq"]
 
-                        if not ret:
+                        if lost:
                             print(
                                 f"[WARNING] Lost stream from "
                                 f"{self.camera_id}. Reconnecting..."
                             )
                             self._close_open_rows()
-                            break  # back to the outer loop and reconnect
+                            break
 
-                        # Live feed for the browser: the RAW frame, taken before
-                        # processing draws anything (encodes only while watched).
-                        hub.beat(self.camera_id)
-                        if hub.wants(self.camera_id):
-                            hub.publish(self.camera_id, frame)
-
-                        output_frame = self.logic.process(frame)
+                        output_frame = self.logic.process(frame, tracks)
                         self.last_frame_time = datetime.now()
+
+                        n_frames += 1
+                        if n_frames % 100 == 0:
+                            print(f"[FPS] {self.camera_id}: logic "
+                                  f"{n_frames / (time.time() - t_start):.1f} fps, "
+                                  f"tracker {self.logic.tracker.frame_idx} frames total")
+                            n_frames, t_start = 0, time.time()
 
                         if self.recorder is not None:
                             self.recorder.write(output_frame)
@@ -160,7 +200,9 @@ class CameraWorker:
                                 stop = True
                                 break
                 finally:
+                    stop_evt.set()
                     cap.release()
+                    tracker_thread.join(timeout=10)
 
                 if not stop:
                     time.sleep(RETRY_SECONDS)

@@ -301,14 +301,17 @@ class FrameLogic:
 
     # ---------------- main entry ----------------
 
-    def process(self, frame):
-        now = time.time()
+    def process(self, frame, tracks=None):
+        t0 = time.time()
+        now = t0
         self._check_shift(now)
 
-        self.tracks = self.tracker.update(frame)
+        self.tracks = tracks if tracks is not None else self.tracker.update(frame)
+        t1 = time.time()
         self._update_bindings(now)
 
         persons, towels, bwts, near, wobjs, objects, boxes = self._detect(frame)
+        t2 = time.time()
 
         ctx = {"towels": towels, "bwts": bwts, "near": near, "wobjs": wobjs}
         for p in persons:
@@ -320,6 +323,12 @@ class FrameLogic:
 
         if self.draw:
             self._draw(frame, persons, towels, bwts, near, wobjs, objects, boxes, now)
+        t3 = time.time()
+
+        self._tn = getattr(self, "_tn", 0) + 1
+        if self._tn % 100 == 0:
+            print(f"[TIME] cam={self.camera_id} track={1000*(t1-t0):.0f}ms "
+                  f"detect+pose={1000*(t2-t1):.0f}ms rest+draw={1000*(t3-t2):.0f}ms")
 
         return frame
 

@@ -105,8 +105,21 @@ class PersonTracker:
         self.recent_events = deque(maxlen=6)
         self._debug_tracks = []
 
+        self._lock = threading.RLock()
         self.mgr = None
         self.frame_idx = 0
+
+        # Warm-up: first calls are slow (CUDA init); do them before the stream starts.
+        _dummy = np.zeros((1080, 1920, 3), np.uint8)
+        self.model.track(_dummy, persist=True, tracker=str(self.yaml_path),
+                         classes=[self.person_class], conf=self.args.conf,
+                         imgsz=self.args.imgsz, device=self.device,
+                         half=self.half, verbose=False)
+        self.encoder(_dummy, np.array([[100, 100, 200, 400]], np.float32))
+        _pred = getattr(self.model, "predictor", None)
+        for _t in (getattr(_pred, "trackers", None) or []):
+            _t.reset()
+
         print(f"[INFO] {camera_id}: person tracking on, max_ids={self.args.max_ids}, "
               f"gallery={self.args.gallery_mode}, learn_s={self.args.learn_s}, "
               f"area={'station ROI' if self.roi is not None else 'full frame'}")
@@ -154,6 +167,10 @@ class PersonTracker:
         self._last_t = now
 
     def reset(self):
+        with self._lock:
+            self._reset()
+
+    def _reset(self):
         """Forget every P-ID (e.g. at a shift change: new people, closed set starts again)."""
         self.mgr = None
         predictor = getattr(self.model, "predictor", None)
@@ -166,6 +183,10 @@ class PersonTracker:
 
     # ------------------------------------------------------------------ #
     def update(self, frame):
+        with self._lock:
+            return self._update(frame)
+
+    def _update(self, frame):
         if self.auto_fps:
             self._measure_fps()
 
