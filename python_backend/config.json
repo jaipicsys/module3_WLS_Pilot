@@ -15,7 +15,7 @@
   "record_retention_days": 7,
   "plant": "Unit 1 Textile",
   "rtsp_urls": {
-    "cam1": "rtsp://192.168.2.218:8554/cam1"
+    "cam1": "rtsp://192.168.2.10:8554/cam1"
   },
   "models_dir": "models",
   "pose_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/yolov8m-pose.pt",

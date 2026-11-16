@@ -111,29 +111,11 @@ class CameraWorker:
         window_name = f"Camera - {self.camera_id}"
         stop = False
 
-        # Identify local video files separately from live network streams.
-        is_file_source = os.path.isfile(self.rtsp_url)
-
-        if is_file_source:
-            print(f"[INFO] {self.camera_id}: MP4/file playback mode")
-        else:
-            print(f"[INFO] {self.camera_id}: live RTSP mode")
-
         try:
             while not stop:
                 try:
                     # Same background latest-frame reader as the independent tracker.
-                    if is_file_source:
-                        cap = cv2.VideoCapture(self.rtsp_url)
-
-                        if not cap.isOpened():
-                            cap.release()
-                            raise RuntimeError(
-                                f"Cannot open video file: {self.rtsp_url}"
-                            )
-                    else:
-                        # Keep existing RTSP behaviour exactly as it is.
-                        cap = tp.RTSPReader(self.rtsp_url)
+                    cap = tp.RTSPReader(self.rtsp_url)
                 except Exception as exc:
                     print(
                         f"[WARNING] {self.camera_id} not connected ({exc}). "
@@ -144,40 +126,22 @@ class CameraWorker:
 
                 source_fps = cap.get(cv2.CAP_PROP_FPS)
                 self.logic.tracker.set_source_fps(source_fps)
-                reader_type = "file reader" if is_file_source else "latest-frame reader"
-
                 print(
                     f"[INFO] {self.camera_id} connected "
-                    f"(source FPS={self.logic.tracker.fps:.2f}, {reader_type})."
+                    f"(source FPS={self.logic.tracker.fps:.2f}, latest-frame reader)."
                 )
 
                 try:
                     while True:
-                        # Start timing only for local video files.
-                        frame_start = time.perf_counter() if is_file_source else None
-
                         ret, frame = cap.read()
 
                         if not ret:
-
-                            if is_file_source:
-                                print(
-                                    f"[INFO] MP4 playback completed: "
-                                    f"{self.camera_id}"
-                                )
-
-                                self._close_open_rows()
-                                stop = True
-                                break
-
-                            else:
-                                print(
-                                    f"[WARNING] Lost stream from "
-                                    f"{self.camera_id}. Reconnecting..."
-                                )
-
-                                self._close_open_rows()
-                                break
+                            print(
+                                f"[WARNING] Lost stream from "
+                                f"{self.camera_id}. Reconnecting..."
+                            )
+                            self._close_open_rows()
+                            break  # back to the outer loop and reconnect
 
                         # Live feed for the browser: the RAW frame, taken before
                         # processing draws anything (encodes only while watched).
@@ -195,18 +159,6 @@ class CameraWorker:
                             if not self._show(output_frame, window_name):
                                 stop = True
                                 break
-                        # Control playback speed for local MP4 files only.
-                        # RTSP processing is not delayed.
-                        if is_file_source:
-
-                            fps = max(1.0, self.logic.tracker.fps)
-                            frame_interval = 1.0 / fps
-
-                            elapsed = time.perf_counter() - frame_start
-                            remaining = frame_interval - elapsed
-
-                            if remaining > 0:
-                                time.sleep(remaining)
                 finally:
                     cap.release()
 

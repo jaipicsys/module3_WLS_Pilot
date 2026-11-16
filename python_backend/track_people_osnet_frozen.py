@@ -53,7 +53,7 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 # =========================================================================== #
 # INPUT CONFIG — edit here (command-line --source / --weights still override)
 # =========================================================================== #
-RTSP_SOURCE = "rtsp://192.168.2.218:8554/cam1"
+RTSP_SOURCE = "rtsp://192.168.2.10:8554/cam1"
 VIDEO_SOURCE = "/home/yasmin/EigenState/Excavator/tracking/input/packing.mp4"
 USE_RTSP = True  # True -> RTSP_SOURCE, False -> VIDEO_SOURCE
 SOURCE = RTSP_SOURCE if USE_RTSP else VIDEO_SOURCE
