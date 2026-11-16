@@ -880,3 +880,7 @@ class FrameLogic:
                     if p["kconf"][k] > wc:
                         x, y = p["kxy"][k]
                         cv2.circle(frame, (int(x), int(y)), 10, dot, -1)
+
+        # ReID diagnostics from track_people_osnet_frozen.py: appearance distances,
+        # confidence, pending threshold, recent switch reason and event history.
+        self.tracker.draw_debug(frame)

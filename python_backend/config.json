@@ -30,7 +30,7 @@
     "reid_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
     "person_class": 0,
     "max_ids": 7,
-    "fps": 25,
+    "fps": 15,
     "bind_seconds": 5,
     "bind_gap_seconds": 2,
     "id_grace_seconds": 30,

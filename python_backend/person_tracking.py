@@ -15,9 +15,11 @@ update(frame) returns one dict per tracked person:
 gid -1 = the tracker sees a person but no P-ID is trusted yet (grey "?").
 """
 
+import re
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -97,6 +99,11 @@ class PersonTracker:
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_file = open(log_dir / f"tracking_{camera_id}.txt", "a", buffering=1)
         self.print_events = cfg.get("print_events", True)
+        # Match the standalone script's ReID diagnostics on the output video.
+        self.debug_overlay = cfg.get("debug_overlay", True)
+        self.track_events = {}          # local track id -> (frame, reason)
+        self.recent_events = deque(maxlen=6)
+        self._debug_tracks = []
 
         self.mgr = None
         self.frame_idx = 0
@@ -116,8 +123,27 @@ class PersonTracker:
     def _log(self, fi, msg):
         line = f"{datetime.now():%Y-%m-%d %H:%M:%S} [{self.camera_id} frame {fi}] {msg}"
         self._log_file.write(line + "\n")
+        # Same event filtering and local-track extraction as frozen.py.
+        first = msg.split()[0] if msg.split() else ""
+        if first in ("NEW", "RELINK", "MOVE", "SWAP", "UNLABEL", "UNKNOWN"):
+            self.recent_events.append((fi, msg))
+            match = re.search(r"tracks? (\d+)(?:,(\d+))?", msg)
+            if match:
+                for track_id in match.groups():
+                    if track_id:
+                        self.track_events[int(track_id)] = (fi, msg)
         if self.print_events:
             print(f"[TRACK] {line}")
+
+    def draw_debug(self, frame):
+        """Draw the standalone frozen.py ReID diagnostics on the output frame."""
+        if not self.debug_overlay or self.mgr is None or not self._debug_tracks:
+            return
+        results = [(t["lid"], t["gid"], t["state"], t["app_dist"]) for t in self._debug_tracks]
+        boxes = np.asarray([t["box"] for t in self._debug_tracks], dtype=np.float32)
+        confs = np.asarray([t["conf"] for t in self._debug_tracks], dtype=np.float32)
+        tp.draw_debug(frame, self.frame_idx - 1, results, boxes, confs, self.mgr,
+                      self.args, self.track_events, self.recent_events)
 
     def _measure_fps(self):
         now = time.time()
@@ -180,6 +206,7 @@ class PersonTracker:
                 {"gid": int(gid), "lid": int(lid), "state": state, "box": box,
                  "conf": float(cf), "app_dist": float(d)}
             )
+        self._debug_tracks = visible
         return visible
 
     def set_source_fps(self, fps):
