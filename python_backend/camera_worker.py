@@ -27,6 +27,16 @@ LIVE_FEED = CONFIG.get("live_feed", {})
 hub.configure(LIVE_FEED.get("fps"), LIVE_FEED.get("width"), LIVE_FEED.get("quality"))
 
 
+def _release_reader(reader):
+    """Stop a tp.RTSPReader without releasing the capture while its thread is
+    still inside cap.read() (that race segfaults OpenCV/FFmpeg)."""
+    reader.stopped = True
+    reader.t.join(timeout=15)
+    if reader.t.is_alive():
+        print("[WARNING] RTSP reader thread did not stop; skipping release to avoid a crash")
+        return
+    reader.cap.release()
+
 class CameraWorker:
     def __init__(
         self,
@@ -199,10 +209,14 @@ class CameraWorker:
                             if not self._show(output_frame, window_name):
                                 stop = True
                                 break
+                except Exception:
+                    traceback.print_exc()
+                    print(f"[ERROR] {self.camera_id}: processing failed, reconnecting...")
+                    self._close_open_rows()
                 finally:
                     stop_evt.set()
-                    cap.release()
                     tracker_thread.join(timeout=10)
+                    _release_reader(cap)
 
                 if not stop:
                     time.sleep(RETRY_SECONDS)
