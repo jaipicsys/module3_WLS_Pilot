@@ -13,6 +13,22 @@ update(frame) returns one dict per tracked person:
   {"gid": 3 or -1, "lid": tracker id, "state": "tracked"/"pending"/"unknown"/...,
    "box": np.array([x1, y1, x2, y2]), "conf": float, "app_dist": float}
 gid -1 = the tracker sees a person but no P-ID is trusted yet (grey "?").
+
+FILES WRITTEN (all inside  tracking_runtime/ , next to <camera>_botsort.yaml)
+  <cam>_<stamp>_tracks.txt   one CSV row per detected box per frame
+                             (same columns as the standalone script's *_tracks.txt)
+  <cam>_<stamp>_events.txt   NEW / RELINK / MOVE / SWAP / UNLABEL / UNKNOWN / GALLERY lines
+                             (same format as the standalone script's *_events.txt),
+                             plus a "=== SUMMARY ===" block when the stream ends
+  crops/<cam>_<stamp>/P<n>/  OPTIONAL clean person crops (config: tracking.save_crops_every)
+The video is NOT written here (video_recorder.py already stores it in recordings/).
+
+Optional keys in config.json -> "tracking":
+  "save_crops_every": 30         save crops every N frames (0 = off). Use a multiple of 3.
+  "save_crops_min_conf": 0.6     only confident detections
+  "save_crops_max_per_id": 1000  cap per P-ID per session
+  "log_segment_minutes": 60      start new tracks/events files this often (0 = never)
+  "log_retention_days": 7        delete old tracks/events files after N days (0 = keep all)
 """
 
 import re
@@ -31,6 +47,9 @@ import track_people_osnet_frozen as tp
 from config_utils import BASE_DIR, CONFIG, resolve_model_path
 
 _ARGS_LOCK = threading.Lock()
+
+TRACKS_HEADER = ("frame,time_s,global_id,track_id,state,x1,y1,x2,y2,w,h,cx,cy,"
+                 "foot_x,foot_y,conf,app_dist,next_id,next_dist\n")
 
 
 def _default_args():
@@ -82,7 +101,8 @@ class PersonTracker:
         # ---- appearance model (OSNet .pt or .onnx) ----
         if not cfg.get("reid_model"):
             raise ValueError("tracking.reid_model is not set in config.json")
-        self.encoder = tp.Encoder(resolve_model_path(cfg["reid_model"]), device)
+        self.reid_path = resolve_model_path(cfg["reid_model"])
+        self.encoder = tp.Encoder(self.reid_path, device)
 
         # ---- fps: start value, then measured processing rate ----
         self.fps = float(cfg.get("fps", 10))
@@ -92,18 +112,37 @@ class PersonTracker:
 
         run_dir = Path(BASE_DIR) / "tracking_runtime"
         run_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir = run_dir
         self.yaml_path = run_dir / f"{camera_id}_botsort.yaml"
         tp.write_tracker_yaml(self.yaml_path, self.args, self.fps)
 
+        # wall-clock event log (one file per camera, appended)
         log_dir = Path(BASE_DIR) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_file = open(log_dir / f"tracking_{camera_id}.txt", "a", buffering=1)
         self.print_events = cfg.get("print_events", True)
+
         # Match the standalone script's ReID diagnostics on the output video.
         self.debug_overlay = cfg.get("debug_overlay", True)
         self.track_events = {}          # local track id -> (frame, reason)
         self.recent_events = deque(maxlen=6)
         self._debug_tracks = []
+
+        # ---- standalone-style log files (tracks / events) ----
+        self.segment_s = float(cfg.get("log_segment_minutes", 60)) * 60
+        self.retention_days = float(cfg.get("log_retention_days", 7))
+        self._tracks_f = None
+        self._events_f = None
+        self._stem = None
+        self._seg_start = 0.0
+        self._open_logs()
+
+        # ---- optional crop saving (for reviewing / retraining ReID) ----
+        self.crop_every = int(cfg.get("save_crops_every", 0))
+        self.crop_min_conf = float(cfg.get("save_crops_min_conf", 0.6))
+        self.crop_max_per_id = int(cfg.get("save_crops_max_per_id", 1000))
+        self._crop_session = None       # folder name, new for every new ID set
+        self._crop_count = {}           # gid -> crops saved in this session
 
         self._lock = threading.RLock()
         self.mgr = None
@@ -122,8 +161,126 @@ class PersonTracker:
 
         print(f"[INFO] {camera_id}: person tracking on, max_ids={self.args.max_ids}, "
               f"gallery={self.args.gallery_mode}, learn_s={self.args.learn_s}, "
-              f"area={'station ROI' if self.roi is not None else 'full frame'}")
+              f"area={'station ROI' if self.roi is not None else 'full frame'}, "
+              f"crops={'every %d frames' % self.crop_every if self.crop_every else 'off'}")
+        print(f"[INFO] {camera_id}: tracking logs -> {self.run_dir}")
 
+    # ------------------------------------------------------------------ #
+    # log files
+    # ------------------------------------------------------------------ #
+    def _open_logs(self):
+        """Open a fresh <cam>_<stamp>_tracks.txt / _events.txt pair."""
+        for f in (self._tracks_f, self._events_f):
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._stem = f"{self.camera_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+        self._tracks_f = open(self.run_dir / f"{self._stem}_tracks.txt", "w", buffering=1)
+        self._tracks_f.write(TRACKS_HEADER)
+        self._events_f = open(self.run_dir / f"{self._stem}_events.txt", "w", buffering=1)
+        self._seg_start = time.time()
+        self._delete_old_logs()
+
+    def _delete_old_logs(self):
+        if self.retention_days <= 0:
+            return
+        limit = time.time() - self.retention_days * 86400
+        for pat in (f"{self.camera_id}_*_tracks.txt", f"{self.camera_id}_*_events.txt"):
+            for p in self.run_dir.glob(pat):
+                try:
+                    if p.stat().st_mtime < limit:
+                        p.unlink()
+                except OSError:
+                    pass
+
+    def _maybe_rotate_logs(self):
+        if self.segment_s > 0 and time.time() - self._seg_start >= self.segment_s:
+            self._open_logs()
+            self._log_header()   # so each file starts with the settings that were used
+
+    def _log_header(self):
+        a, m = self.args, self.mgr
+        self._log(self.frame_idx,
+                  f"source={self.camera_id} {m.W}x{m.H}@{m.fps:.1f}fps "
+                  f"tracker_yaml={self.yaml_path}")
+        self._log(self.frame_idx,
+                  f"reid={self.reid_path} gallery={a.gallery_mode} gallery_size={a.gallery_size} "
+                  f"assign_app_max={a.assign_app_max} keep_dist={a.keep_dist} "
+                  f"unlabel_dist={a.unlabel_dist} verify={a.verify_votes}/{a.verify_window} "
+                  f"learn_s={a.learn_s} verify_after_s={a.verify_after_s} "
+                  f"stable={a.stable_s}s/{a.stable_margin} partial_h={a.partial_h_ratio} "
+                  f"max_radius={a.max_radius} confirm_min_conf={a.confirm_min_conf}")
+
+    def _write_tracks(self, fi, results, boxes, confs):
+        """Same rows as track_people_osnet_frozen.py: every detected box (not only the ROI)."""
+        self._maybe_rotate_logs()
+        ts = fi / self.mgr.fps
+        for (lid, gid, state, d), box, cf in zip(results, boxes, confs):
+            x1, y1, x2, y2 = box
+            fx, fy = (x1 + x2) / 2.0, y2
+            nid, nd = -1, -1.0
+            if gid > 0:
+                lc = self.mgr.people[gid].last_check
+                if lc and lc[0] == fi:
+                    _, _, nid, nd = lc
+                    nid = -1 if nid is None else nid
+            self._tracks_f.write(
+                f"{fi},{ts:.3f},{gid},{lid},{state},{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f},"
+                f"{x2 - x1:.1f},{y2 - y1:.1f},{(x1 + x2) / 2:.1f},{(y1 + y2) / 2:.1f},"
+                f"{fx:.1f},{fy:.1f},{cf:.3f},{d:.3f},{nid},{nd:.3f}\n")
+
+    def write_summary(self):
+        """Same '=== SUMMARY ===' block the standalone script writes when it stops."""
+        with self._lock:
+            if self.mgr is None:
+                return
+            fi, fps = self.frame_idx, self.mgr.fps
+            self._log(fi, "=== SUMMARY ===")
+            for p in sorted(self.mgr.people.values(), key=lambda p: p.gid):
+                self._log(fi, f"P{p.gid}: first={p.first_frame / fps:.1f}s "
+                              f"last={p.last_frame / fps:.1f}s frames={p.frames_seen} "
+                              f"relinks={p.relinks} swaps/moves={p.reassigns} "
+                              f"path={p.path_px:.0f}px gallery={len(p.gallery)}"
+                              f"{' (frozen)' if p.frozen else ''}")
+
+    # ------------------------------------------------------------------ #
+    # crops
+    # ------------------------------------------------------------------ #
+    def _save_crops(self, fi, frame, results, boxes, confs):
+        """Save clean crops of people that carry a P-ID. Crops go in a folder per ID SESSION,
+        because P-IDs restart after a shift change / restart (P1 may be a different person).
+        The labels are the system's OWN guesses: review them before using them for training."""
+        if not self.crop_every or fi % self.crop_every:
+            return
+        H, W = frame.shape[:2]
+        n = len(boxes)
+        ious = tp.iou_matrix(boxes, boxes) if n > 1 else None
+        if ious is not None:
+            np.fill_diagonal(ious, 0)
+        for k, ((lid, gid, state, d), box, cf) in enumerate(zip(results, boxes, confs)):
+            # confident, already-labelled, and its look really matches that ID
+            if gid <= 0 or state != "tracked" or cf < self.crop_min_conf:
+                continue
+            if not (0 <= d <= self.args.assign_app_max):
+                continue
+            if ious is not None and ious[k].max() > 0.05:    # nobody overlapping
+                continue
+            if self._crop_count.get(gid, 0) >= self.crop_max_per_id:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in box]
+            if x1 < 3 or y1 < 3 or x2 > W - 3 or y2 > H - 3:  # not cut by the frame edge
+                continue
+            if x2 - x1 < 40 or y2 - y1 < 100:
+                continue
+            folder = self.run_dir / "crops" / self._crop_session / f"P{gid}"
+            folder.mkdir(parents=True, exist_ok=True)
+            name = f"f{fi:07d}_t{lid}_d{d:.2f}.jpg"
+            cv2.imwrite(str(folder / name), frame[y1:y2, x1:x2])
+            self._crop_count[gid] = self._crop_count.get(gid, 0) + 1
+
+    # ------------------------------------------------------------------ #
     def _in_roi(self, box):
         """Box centre or feet inside the station ROI."""
         x1, y1, x2, y2 = box
@@ -132,10 +289,13 @@ class PersonTracker:
                 return True
         return False
 
-    # ------------------------------------------------------------------ #
     def _log(self, fi, msg):
+        fps = self.mgr.fps if self.mgr is not None else self.fps
+        # wall-clock log (logs/tracking_<cam>.txt)
         line = f"{datetime.now():%Y-%m-%d %H:%M:%S} [{self.camera_id} frame {fi}] {msg}"
         self._log_file.write(line + "\n")
+        # standalone-style log (tracking_runtime/<cam>_<stamp>_events.txt)
+        self._events_f.write(f"[frame {fi:6d} | {fi / fps:8.2f}s] {msg}\n")
         # Same event filtering and local-track extraction as frozen.py.
         first = msg.split()[0] if msg.split() else ""
         if first in ("NEW", "RELINK", "MOVE", "SWAP", "UNLABEL", "UNKNOWN"):
@@ -148,14 +308,23 @@ class PersonTracker:
         if self.print_events:
             print(f"[TRACK] {line}")
 
-    def draw_debug(self, frame):
-        """Draw the standalone frozen.py ReID diagnostics on the output frame."""
-        if not self.debug_overlay or self.mgr is None or not self._debug_tracks:
+    def draw_debug(self, frame, tracks=None):
+        """Draw the standalone frozen.py ReID diagnostics on the output frame, plus
+        'tracker frame N' (the same N as in *_events.txt / *_tracks.txt) so a moment in the
+        recording can be matched with the logs. Pass the tracks that belong to this frame."""
+        if not self.debug_overlay or self.mgr is None:
             return
-        results = [(t["lid"], t["gid"], t["state"], t["app_dist"]) for t in self._debug_tracks]
-        boxes = np.asarray([t["box"] for t in self._debug_tracks], dtype=np.float32)
-        confs = np.asarray([t["conf"] for t in self._debug_tracks], dtype=np.float32)
-        tp.draw_debug(frame, self.frame_idx - 1, results, boxes, confs, self.mgr,
+        tracks = tracks if tracks is not None else self._debug_tracks
+        fi = tracks[0].get("fi", self.frame_idx - 1) if tracks else self.frame_idx - 1
+        label = f"tracker frame {fi}"
+        cv2.putText(frame, label, (10, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 0), 6, cv2.LINE_AA)
+        cv2.putText(frame, label, (10, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 2, cv2.LINE_AA)
+        if not tracks:
+            return
+        results = [(t["lid"], t["gid"], t["state"], t["app_dist"]) for t in tracks]
+        boxes = np.asarray([t["box"] for t in tracks], dtype=np.float32)
+        confs = np.asarray([t["conf"] for t in tracks], dtype=np.float32)
+        tp.draw_debug(frame, fi, results, boxes, confs, self.mgr,
                       self.args, self.track_events, self.recent_events)
 
     def _measure_fps(self):
@@ -172,6 +341,7 @@ class PersonTracker:
 
     def _reset(self):
         """Forget every P-ID (e.g. at a shift change: new people, closed set starts again)."""
+        self.write_summary()                 # close the old ID set in the events file
         self.mgr = None
         predictor = getattr(self.model, "predictor", None)
         for t in (getattr(predictor, "trackers", None) or []):
@@ -194,6 +364,11 @@ class PersonTracker:
             h, w = frame.shape[:2]
             fps = float(np.clip(1.0 / self._dt, 1, 60)) if self._dt else self.fps
             self.mgr = tp.GlobalIDManager(fps, w, h, self.args, self._log)
+            self._sessions = getattr(self, "_sessions", 0) + 1
+            self._crop_session = (f"{self.camera_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+                                  f"_s{self._sessions}")
+            self._crop_count = {}
+            self._log_header()
         elif self.auto_fps and self._dt and self.frame_idx % 50 == 0:
             # Time-based settings (learn_s, verify_after_s, ...) follow the real rate.
             self.mgr.fps = float(np.clip(1.0 / self._dt, 1, 60))
@@ -214,9 +389,15 @@ class PersonTracker:
 
         # Mirror the independent script: all detected people reach GlobalIDManager.
         # Apply Station ROI only to the returned tracks used by station/operator logic.
+        fi = self.frame_idx
         all_results = self.mgr.update(
-            self.frame_idx, lids, boxes, confs, lambda bx: self.encoder(frame, bx)
+            fi, lids, boxes, confs, lambda bx: self.encoder(frame, bx)
         )
+        self._write_tracks(fi, all_results, boxes, confs)
+        try:
+            self._save_crops(fi, frame, all_results, boxes, confs)
+        except Exception as exc:  # noqa: BLE001  (crops must never break tracking)
+            print(f"[WARNING] {self.camera_id}: saving crops failed: {exc}")
         self.frame_idx += 1
 
         visible = []
@@ -225,7 +406,7 @@ class PersonTracker:
                 continue
             visible.append(
                 {"gid": int(gid), "lid": int(lid), "state": state, "box": box,
-                 "conf": float(cf), "app_dist": float(d)}
+                 "conf": float(cf), "app_dist": float(d), "fi": fi}
             )
         self._debug_tracks = visible
         return visible

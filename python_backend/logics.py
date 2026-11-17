@@ -892,4 +892,4 @@ class FrameLogic:
 
         # ReID diagnostics from track_people_osnet_frozen.py: appearance distances,
         # confidence, pending threshold, recent switch reason and event history.
-        self.tracker.draw_debug(frame)
+        self.tracker.draw_debug(frame, self.tracks)

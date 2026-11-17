@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+import traceback
 from datetime import datetime
 
 # Use TCP for RTSP and give up on a dead connection after 5 seconds
@@ -36,6 +37,27 @@ def _release_reader(reader):
         print("[WARNING] RTSP reader thread did not stop; skipping release to avoid a crash")
         return
     reader.cap.release()
+
+
+class FileReader:
+    """TEST ONLY: reads a video file frame by frame, nothing dropped (like the standalone
+    script on an .mp4). Use it by putting a file path instead of rtsp:// in config.json."""
+
+    def __init__(self, path):
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open {path}")
+        self.stopped = False
+        self.t = threading.Thread(target=lambda: None)  # so _release_reader() works
+        self.t.start()
+
+    def read(self):
+        ok, frame = self.cap.read()
+        return (True, frame) if ok else (False, None)
+
+    def get(self, prop):
+        return self.cap.get(prop)
+
 
 class CameraWorker:
     def __init__(
@@ -126,7 +148,11 @@ class CameraWorker:
             while not stop:
                 try:
                     # Same background latest-frame reader as the independent tracker.
-                    cap = tp.RTSPReader(self.rtsp_url)
+                    if str(self.rtsp_url).lower().startswith(
+                            ("rtsp://", "rtmp://", "http://", "https://")):
+                        cap = tp.RTSPReader(self.rtsp_url)
+                    else:
+                        cap = FileReader(self.rtsp_url)   # test: video file path
                 except Exception as exc:
                     print(
                         f"[WARNING] {self.camera_id} not connected ({exc}). "
@@ -217,6 +243,10 @@ class CameraWorker:
                     stop_evt.set()
                     tracker_thread.join(timeout=10)
                     _release_reader(cap)
+                    try:
+                        self.logic.tracker.write_summary()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[WARNING] {self.camera_id}: tracking summary failed: {exc}")
 
                 if not stop:
                     time.sleep(RETRY_SECONDS)

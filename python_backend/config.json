@@ -36,6 +36,10 @@
     "id_grace_seconds": 30,
     "reset_on_shift_change": true,
     "print_events": true,
+    "save_crops_every": 30,
+    "save_crops_max_per_id": 1000,
+    "log_segment_minutes": 60,
+    "log_retention_days": 7,
     "overrides": {
       "gallery_mode": "frozen",
       "learn_s": 60,
