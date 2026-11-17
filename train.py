@@ -23,14 +23,17 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from common import NEG, POS, ROI, Encoder, cached_features, list_videos, make_crop
+from common import NEG, POS, ROI, Encoder, cached_features, list_videos, make_crop, parse_roi
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data", default="data")
 ap.add_argument("--out", default="pack_model.joblib")
 ap.add_argument("--no-mask", action="store_true")
 ap.add_argument("--C", type=float, default=0.1, help="smaller = stronger regularisation")
+ap.add_argument("--roi", help="ROI as JSON (default: ROI in common.py)")
 a = ap.parse_args()
+if a.roi:
+    ROI = parse_roi(a.roi)
 
 pos, neg = list_videos(f"{a.data}/train/{POS}"), list_videos(f"{a.data}/train/{NEG}")
 print(f"train clips: {len(pos)} {POS}, {len(neg)} {NEG}")
@@ -39,7 +42,7 @@ if not pos or not neg:
                      "With only positives the model has nothing to compare against.")
 
 mask = not a.no_mask
-tag = "mask" if mask else "nomask"
+tag = ("mask" if mask else "nomask") + "_" + "_".join(map(str, ROI.flatten()))
 crop, enc = make_crop(ROI, mask), Encoder()
 
 X, y, groups = [], [], []

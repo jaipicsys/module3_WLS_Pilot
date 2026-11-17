@@ -7,12 +7,15 @@ import argparse
 
 import cv2
 
-from common import ROI, make_crop
+from common import ROI, make_crop, parse_roi
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--video", required=True)
 ap.add_argument("--t", type=float, default=0.0, help="time in seconds")
+ap.add_argument("--roi", help="ROI as JSON, e.g. '[[745,645],[819,979],[1168,885],[1041,557]]'")
 a = ap.parse_args()
+if a.roi:
+    ROI = parse_roi(a.roi)
 
 cap = cv2.VideoCapture(a.video)
 cap.set(cv2.CAP_PROP_POS_MSEC, a.t * 1000)

@@ -23,6 +23,15 @@ MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
 
 
+def parse_roi(text):
+    """'[[745,645],[819,979],[1168,885],[1041,557]]' -> int32 array (N,2)."""
+    import json
+    roi = np.array(json.loads(text), np.int32)
+    if roi.ndim != 2 or roi.shape[1] != 2 or len(roi) < 3:
+        raise ValueError("ROI must be a list of [x, y] points, at least 3")
+    return roi
+
+
 # ---- ROI crop ---------------------------------------------------------------
 def make_crop(roi=ROI, mask=True):
     """Return f(frame)->224x224 BGR crop of the ROI's bounding square.
@@ -95,7 +104,13 @@ class Encoder:
 def video_features(path, enc, crop, batch=8):
     """Return (times[N], features[N, D]) for every window in a video."""
     times, feats, buf = [], [], []
+    cap = cv2.VideoCapture(path)
+    dur = cap.get(cv2.CAP_PROP_FRAME_COUNT) / (cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    cap.release()
+    show = dur > 60                                  # progress only for long videos
     for t, w in iter_windows(path, crop):
+        if show and len(times) % 40 == 0:
+            print(f"\r  features: {t / 60:5.1f} / {dur / 60:.1f} min", end="", flush=True)
         times.append(t)
         buf.append(w)
         if len(buf) == batch:
@@ -103,6 +118,8 @@ def video_features(path, enc, crop, batch=8):
             buf = []
     if buf:
         feats.append(enc(buf))
+    if show:
+        print()
     if not feats:
         return np.zeros(0), np.zeros((0, 0), np.float32)
     return np.array(times), np.concatenate(feats)

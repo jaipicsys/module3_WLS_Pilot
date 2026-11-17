@@ -16,7 +16,8 @@ import joblib
 import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
 
-from common import NEG, POS, Encoder, draw_overlay, list_videos, make_crop, video_features
+from common import (NEG, POS, Encoder, draw_overlay, list_videos, make_crop,
+                    parse_roi, video_features)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="pack_model.joblib")
@@ -25,10 +26,14 @@ ap.add_argument("--thr", type=float, default=0.5)
 ap.add_argument("--vis-dir", help="save labelled test clips with overlay here")
 ap.add_argument("--video", help="run on one (unlabelled) video instead")
 ap.add_argument("--vis", help="output video path for --video mode")
+ap.add_argument("--roi", help="test on a different operator's ROI, e.g. "
+                "'[[745,645],[819,979],[1168,885],[1041,557]]' (default: the training ROI)")
 a = ap.parse_args()
 
 M = joblib.load(a.model)
-clf, roi = M["clf"], np.array(M["roi"], np.int32)
+clf = M["clf"]
+roi = parse_roi(a.roi) if a.roi else np.array(M["roi"], np.int32)
+print(f"ROI: {roi.tolist()}")
 crop, enc = make_crop(roi, M["mask"]), Encoder()
 
 
@@ -53,6 +58,9 @@ def write_vis(src, dst, times, probs):
             p = probs[k] if abs(times[k] - n / fps) <= 1.0 else None
         wr.write(draw_overlay(f, p, a.thr, roi))
         n += 1
+        if n % (int(fps) * 30) == 0:
+            print(f"\r  writing video: {n / fps / 60:5.1f} min", end="", flush=True)
+    print()
     wr.release()
 
 
