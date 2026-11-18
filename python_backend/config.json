@@ -42,8 +42,13 @@
     "log_retention_days": 7,
     "overrides": {
       "gallery_mode": "frozen",
-      "learn_s": 60,
-      "confirm_min_conf": 0.5
+      "learn_s": 180,
+      "gallery_size": 60,
+      "confirm_min_conf": 0.5,
+
+      "swap_strong_margin": 9,
+      "swap_votes": 99,
+      "refresh_every_s": 0
     },
     "roi_margin_px": 150,
     "auto_fps": false

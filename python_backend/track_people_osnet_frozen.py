@@ -289,6 +289,8 @@ class Person:
     heights: deque = field(default_factory=lambda: deque(maxlen=300))  # recent box heights
     last_check: tuple | None = None  # (frame, own dist, next closest gid, its dist) for the overlay
     last_d: tuple | None = None  # (frame, own dist) from the latest embedding of this person
+    last_refresh: int = 0  # frame of the last periodic gallery refresh (or of the freeze)
+    refreshes: int = 0  # how many refresh samples were learnt
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -379,6 +381,7 @@ class GlobalIDManager:
         n = len(p.gallery)
         if n >= self.a.gallery_size or (p.frames_seen >= self.a.learn_s * self.fps and n >= self.a.learn_min):
             p.frozen = True
+            p.last_refresh = frame_idx
             self.log(frame_idx, f"GALLERY FROZEN P{p.gid}: {n} samples after {p.frames_seen / self.fps:.0f}s seen")
 
     def update_home(self, p: Person, box):
@@ -484,7 +487,7 @@ class GlobalIDManager:
 
         self._update_contacts(frame_idx, linked_idx, boxes)
         if verify_tick:
-            self._verify(frame_idx, linked_idx, embs, local_ids, boxes, out)
+            self._verify(frame_idx, linked_idx, embs, local_ids, boxes, out, confs)
         if ready:
             self._resolve(frame_idx, ready, local_ids, boxes, out)
         return out
@@ -607,7 +610,109 @@ class GlobalIDManager:
         self.log(frame_idx, f"UNLABEL track {lid}: was P{p.gid} — {why}")
         out[i] = (lid, -1, "unknown", own)
 
-    def _verify(self, frame_idx, linked_idx, embs, local_ids, boxes, out):
+    def _refresh_galleries(self, frame_idx, linked_idx, dists, verdicts, embs, boxes, confs):
+        """Periodic learning for frozen galleries (every refresh_every_s per person).
+        A refresh sample is learnt ONLY when it cannot be a mislabel:
+          * person verified 'ok' on every recent check, no overlap in the last contact_memory_s,
+            and the ID is not newly bound / swapped / moved (refresh_settle_s)
+          * full, clean, confident view (not cut by the frame edge, conf >= refresh_min_conf)
+          * own distance <= refresh_accept_dist  AND  every other person is at least
+            refresh_margin further away  -> the sample SEPARATES this person from the others
+        The first learn_min anchors are never dropped; when the gallery is full the most
+        redundant non-anchor sample is replaced, so the size stays constant."""
+        a = self.a
+        every = getattr(a, "refresh_every_s", 120.0)
+        if every <= 0 or a.gallery_mode != "frozen":
+            return
+        for gid, (v, own, alt_g, alt_d) in verdicts.items():
+            p = self.people[gid]
+            i = linked_idx.get(gid)
+            if v != "ok" or not p.frozen or i is None or gid not in dists:
+                continue
+            if frame_idx - p.last_refresh < every * self.fps:
+                continue
+            if frame_idx - p.bind_frame < a.refresh_settle_s * self.fps:
+                continue
+            if self.recently_in_contact(gid, frame_idx):
+                continue
+            if len(p.history) < 5 or any(h != "ok" for h in p.history):
+                continue
+            if confs is not None and float(confs[i]) < a.refresh_min_conf:
+                continue
+            if self.near_edge(boxes[i]) or embs.get(i) is None:
+                continue
+            if own > a.refresh_accept_dist or alt_g is None or alt_d < own + a.refresh_margin:
+                continue
+            emb = embs[i]
+            if p.gallery and (np.asarray(p.gallery) @ emb).max() > a.gallery_dedup_sim:
+                continue  # looks like something already stored: nothing new to learn
+            p.gallery.append(emb)
+            if len(p.gallery) > a.gallery_size:
+                k = a.learn_min
+                G = np.asarray(p.gallery[k:])
+                S = G @ G.T
+                np.fill_diagonal(S, -1)
+                del p.gallery[k + int(S.max(axis=1).argmax())]
+            p.last_refresh = frame_idx
+            p.refreshes += 1
+            self.log(frame_idx, f"GALLERY REFRESH P{gid}: +1 sample (own={own:.2f}, nearest "
+                                f"P{alt_g}={alt_d:.2f}) gallery={len(p.gallery)} refreshes={p.refreshes}")
+
+    def _contact_swap_check(self, frame_idx, linked_idx, embs, local_ids, boxes, out):
+        """Two people overlapped and came apart with their tracker ids CROSSED (BoT-SORT gave
+        each one the other's local id). Compare the pair jointly:
+            straight = d(A, ID_A) + d(B, ID_B)      crossed = d(A, ID_B) + d(B, ID_A)
+        If crossed is clearly smaller for `swap_votes` of the last 5 checks, swap the two IDs.
+        Unlike the per-track check in _verify this does NOT skip a box for being 'partial'
+        (a person walking away from the camera gets a smaller box and is still the same person),
+        and it needs no single track to exceed keep_dist: the pair evidence is what counts."""
+        a = self.a
+        margin = getattr(a, "swap_margin", 0.15)
+        votes_needed = getattr(a, "swap_votes", 3)
+        learn_frames = a.verify_after_s * self.fps
+        sv = self.__dict__.setdefault("_swap_votes", {})
+        for pair, f in list(self.contacts.items()):
+            if len(pair) != 2:
+                continue
+            ga, gb = tuple(pair)
+            if ga not in linked_idx or gb not in linked_idx:
+                continue
+            pa, pb = self.people[ga], self.people[gb]
+            if len(pa.gallery) < a.learn_min or len(pb.gallery) < a.learn_min:
+                continue
+            if pa.frames_seen < learn_frames or pb.frames_seen < learn_frames:
+                continue
+            i, j = linked_idx[ga], linked_idx[gb]
+            if embs.get(i) is None or embs.get(j) is None:   # embeddings exist only for clean boxes
+                continue
+            if self.near_edge(boxes[i]) or self.near_edge(boxes[j]):   # cut by the frame edge
+                continue
+            di = {g: self.people[g].appearance_dist(embs[i]) for g in (ga, gb)}
+            dj = {g: self.people[g].appearance_dist(embs[j]) for g in (ga, gb)}
+            straight, crossed = di[ga] + dj[gb], di[gb] + dj[ga]
+            bad = (crossed + margin < straight and di[gb] <= a.keep_dist and dj[ga] <= a.keep_dist)
+            hist = sv.setdefault(pair, deque(maxlen=5))
+            hist.append(bad)
+            strong = bad and (straight - crossed) >= getattr(a, "swap_strong_margin", 0.25)
+            if not strong and sum(hist) < votes_needed:   # very clear evidence acts on the 1st clean check
+                continue
+            lid, lid2 = local_ids[i], local_ids[j]
+            self.local2gid[lid], self.local2gid[lid2] = gb, ga
+            pa.local_id, pb.local_id = lid2, lid
+            pa.last_box, pb.last_box = boxes[j].copy(), boxes[i].copy()
+            for q in (pa, pb):
+                q.history.clear()
+                q.reassigns += 1
+                q.bind_frame = frame_idx
+                q.bind_how = "swap"
+            self.log(frame_idx, f"SWAP P{ga}<->P{gb} (tracks {lid},{lid2}) after overlap: "
+                                f"straight={straight:.2f} crossed={crossed:.2f}")
+            out[i] = (lid, gb, "swapped", di[gb])
+            out[j] = (lid2, ga, "swapped", dj[ga])
+            linked_idx[ga], linked_idx[gb] = j, i
+            hist.clear()
+
+    def _verify(self, frame_idx, linked_idx, embs, local_ids, boxes, out, confs=None):
         """Every verify_every frames, compare each linked, clearly visible track with ALL people.
         Verdict per check:  'move:<g>' another ID is better by verify_margin and passes assign_app_max
                             'bad'      own distance above unlabel_dist
@@ -615,6 +720,7 @@ class GlobalIDManager:
         Act only if the SAME non-ok verdict wins verify_votes of the last verify_window checks.
         People seen for less than verify_after_s are not verified yet: like the earlier version,
         their ID follows the tracker while their gallery is being learnt."""
+        self._contact_swap_check(frame_idx, linked_idx, embs, local_ids, boxes, out)
         mature = {g: p for g, p in self.people.items() if len(p.gallery) >= self.a.learn_min}
         learn_frames = self.a.verify_after_s * self.fps
         dists, verdicts = {}, {}
@@ -645,6 +751,8 @@ class GlobalIDManager:
                 v = "ok"
             p.history.append(v)
             verdicts[gid] = (v, own, alt_g, alt_d)
+
+        self._refresh_galleries(frame_idx, linked_idx, dists, verdicts, embs, boxes, confs)
 
         for gid, (v, own, alt_g, alt_d) in verdicts.items():
             if gid not in linked_idx or v == "ok":
@@ -913,6 +1021,21 @@ def parse_args():
     ap.add_argument("--home-radius", type=float, default=0.15, help="diag fraction")
     ap.add_argument("--home-alpha", type=float, default=0.002, help="station average update rate")
     # 5e checks
+    ap.add_argument("--swap-margin", type=float, default=0.15,
+                    help="after an overlap, swap two IDs if crossed distances are smaller by this much")
+    ap.add_argument("--swap-votes", type=int, default=3,
+                    help="... in this many of the last 5 checks")
+    ap.add_argument("--swap-strong-margin", type=float, default=0.25,
+                    help="crossed better by this much -> swap on the FIRST clean check (no voting)")
+    ap.add_argument("--refresh-every-s", type=float, default=120,
+                    help="frozen mode: every this many seconds each person may learn 1 new sample (0 = off)")
+    ap.add_argument("--refresh-accept-dist", type=float, default=0.20,
+                    help="refresh sample must be this close to its own ID")
+    ap.add_argument("--refresh-margin", type=float, default=0.10,
+                    help="... and every other ID must be at least this much further away")
+    ap.add_argument("--refresh-min-conf", type=float, default=0.70, help="min detection confidence")
+    ap.add_argument("--refresh-settle-s", type=float, default=30,
+                    help="no refresh this long after an ID was (re)bound / swapped / moved")
     ap.add_argument("--contact-iou", type=float, default=0.2, help="IoU that counts as two people overlapping")
     ap.add_argument("--contact-memory-s", type=float, default=20, help="no gallery learning this long after overlap")
     # run control
