@@ -57,7 +57,7 @@ RTSP_SOURCE = "rtsp://192.168.2.10:8554/cam1"
 VIDEO_SOURCE = "/home/yasmin/EigenState/Excavator/tracking/input/packing.mp4"
 USE_RTSP = True  # True -> RTSP_SOURCE, False -> VIDEO_SOURCE
 SOURCE = RTSP_SOURCE if USE_RTSP else VIDEO_SOURCE
-WEIGHTS = "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt"
+WEIGHTS = "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_imvd_prsn_171126.pt"
 MAX_IDS = 7  # total people that can ever appear (closed set)
 # Step 4 appearance model. First file that exists is used: the OSNet .pt weights run in PyTorch
 # (no extra installs), or the .onnx made by export_osnet.py (needs onnxruntime). If neither exists

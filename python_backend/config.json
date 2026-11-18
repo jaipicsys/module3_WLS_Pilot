@@ -21,15 +21,15 @@
   "pose_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/yolov8m-pose.pt",
   "operations": {
     "Packing": {
-      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt",
+      "model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_imvd_prsn_171126.pt",
       "conf_thresh": 0.6
     }
   },
   "tracking": {
-    "person_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_v1.pt",
+    "person_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_imvd_prsn_171126.pt",
     "reid_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
     "person_class": 0,
-    "max_ids": 7,
+    "max_ids": 10,
     "fps": 13,
     "bind_seconds": 5,
     "bind_gap_seconds": 2,

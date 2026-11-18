@@ -126,6 +126,7 @@ class PersonTracker:
         self.debug_overlay = cfg.get("debug_overlay", True)
         self.track_events = {}          # local track id -> (frame, reason)
         self.recent_events = deque(maxlen=6)
+        self._ev_lock = threading.Lock()  # tracker thread writes, draw thread reads
         self._debug_tracks = []
 
         # ---- standalone-style log files (tracks / events) ----
@@ -299,12 +300,13 @@ class PersonTracker:
         # Same event filtering and local-track extraction as frozen.py.
         first = msg.split()[0] if msg.split() else ""
         if first in ("NEW", "RELINK", "MOVE", "SWAP", "UNLABEL", "UNKNOWN"):
-            self.recent_events.append((fi, msg))
-            match = re.search(r"tracks? (\d+)(?:,(\d+))?", msg)
-            if match:
-                for track_id in match.groups():
-                    if track_id:
-                        self.track_events[int(track_id)] = (fi, msg)
+            with self._ev_lock:
+                self.recent_events.append((fi, msg))
+                match = re.search(r"tracks? (\d+)(?:,(\d+))?", msg)
+                if match:
+                    for track_id in match.groups():
+                        if track_id:
+                            self.track_events[int(track_id)] = (fi, msg)
         if self.print_events:
             print(f"[TRACK] {line}")
 
@@ -324,8 +326,16 @@ class PersonTracker:
         results = [(t["lid"], t["gid"], t["state"], t["app_dist"]) for t in tracks]
         boxes = np.asarray([t["box"] for t in tracks], dtype=np.float32)
         confs = np.asarray([t["conf"] for t in tracks], dtype=np.float32)
-        tp.draw_debug(frame, fi, results, boxes, confs, self.mgr,
-                      self.args, self.track_events, self.recent_events)
+        with self._ev_lock:
+            track_events = dict(self.track_events)
+            recent_events = list(self.recent_events)
+        try:
+            tp.draw_debug(frame, fi, results, boxes, confs, self.mgr,
+                          self.args, track_events, recent_events)
+        except RuntimeError:
+            # The tracker thread changed mgr.people / its state while we were drawing.
+            # The overlay is only a diagnostic: skip this frame instead of failing the stream.
+            pass
 
     def _measure_fps(self):
         now = time.time()
