@@ -20,6 +20,24 @@ from video_recorder import VideoRecorder
 RETRY_SECONDS = CONFIG.get("rtsp_retry_seconds", 3)
 RECORD_VIDEO = CONFIG.get("record_video", False)
 
+# While "person_tracking.enabled" is true the worker runs ONLY YOLOv8n + BoT-SORT + ReID
+# (no operator logic, no DB writes). Set it to false to get the old FrameLogic back.
+TRACKING_MODE = CONFIG.get("person_tracking", {}).get("enabled", False)
+
+if TRACKING_MODE:
+    _tdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracking")
+    _need = ["__init__.py", "person_tracker.py", "tracking_logic.py",
+             "identity.py", "reid_encoder.py", "export_osnet.py"]
+    _missing = [f for f in _need if not os.path.exists(os.path.join(_tdir, f))]
+    if _missing:
+        raise SystemExit(
+            f"[ERROR] Tracking mode is on but these files are missing in {_tdir}:\n"
+            + "".join(f"   - {f}\n" for f in _missing)
+            + "Copy them there (export_osnet.py is your own file: it holds the OSNet network for the .pt),\n"
+              "or set person_tracking.enabled=false in config.json."
+        )
+    from tracking.tracking_logic import TrackingLogic
+
 # Optional "live_feed" block in config.json: {"fps": 10, "width": 960, "quality": 70}
 LIVE_FEED = CONFIG.get("live_feed", {})
 hub.configure(LIVE_FEED.get("fps"), LIVE_FEED.get("width"), LIVE_FEED.get("quality"))
@@ -40,8 +58,8 @@ class CameraWorker:
         self.enable_display = enable_display
         self.display_scale = display_scale
 
-        # All processing logic lives in logics.py
-        self.logic = FrameLogic(camera_id)
+        # All processing logic lives in logics.py (or tracking/ in tracking mode)
+        self.logic = TrackingLogic(camera_id) if TRACKING_MODE else FrameLogic(camera_id)
 
         # Time of the last frame that was processed (None = none since last close).
         self.last_frame_time = None
@@ -78,6 +96,11 @@ class CameraWorker:
         if self.last_frame_time is None:
             return  # nothing processed since the last close
 
+        if TRACKING_MODE:
+            self.logic.on_stream_gap()  # fresh tracker after a reconnect; no DB rows exist
+            self.last_frame_time = None
+            return
+
         try:
             closed = operator_db.close_open_segments(
                 _cam_number(self.camera_id), self.last_frame_time
@@ -105,6 +128,7 @@ class CameraWorker:
         print(f"[INFO] Display enabled: {self.enable_display}")
         print(f"[INFO] Display scale: {self.display_scale}")
         print(f"[INFO] Recording enabled: {RECORD_VIDEO}")
+        print(f"[INFO] Tracking mode (YOLOv8n+BoT-SORT+ReID only): {TRACKING_MODE}")
         print(f"[INFO] Reconnect interval: {RETRY_SECONDS}s")
 
         window_name = f"Camera - {self.camera_id}"

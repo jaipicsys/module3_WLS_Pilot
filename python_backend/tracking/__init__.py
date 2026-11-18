@@ -1,0 +1,1 @@
+"""Person tracking (YOLOv8n + BoT-SORT + OSNet ReID) for the camera worker."""

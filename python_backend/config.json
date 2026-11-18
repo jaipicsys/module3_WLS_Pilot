@@ -64,8 +64,14 @@
           "shift_name": "SHIFT 1",
           "timings": "06:00 - 14:00",
           "breaks": [
-            { "break_name": "Tea Break", "timings": "08:00 - 08:15" },
-            { "break_name": "Lunch Break", "timings": "11:00 - 11:30" }
+            {
+              "break_name": "Tea Break",
+              "timings": "08:00 - 08:15"
+            },
+            {
+              "break_name": "Lunch Break",
+              "timings": "11:00 - 11:30"
+            }
           ]
         },
         {
@@ -73,8 +79,14 @@
           "shift_name": "SHIFT 2",
           "timings": "14:00 - 22:00",
           "breaks": [
-            { "break_name": "Tea Break", "timings": "16:00 - 16:15" },
-            { "break_name": "Dinner Break", "timings": "19:00 - 19:30" }
+            {
+              "break_name": "Tea Break",
+              "timings": "16:00 - 16:15"
+            },
+            {
+              "break_name": "Dinner Break",
+              "timings": "19:00 - 19:30"
+            }
           ]
         },
         {
@@ -82,12 +94,18 @@
           "shift_name": "SHIFT 3",
           "timings": "22:00 - 06:00",
           "breaks": [
-            { "break_name": "Tea Break", "timings": "00:00 - 00:15" },
-            { "break_name": "Meal Break", "timings": "03:00 - 03:30" }
+            {
+              "break_name": "Tea Break",
+              "timings": "00:00 - 00:15"
+            },
+            {
+              "break_name": "Meal Break",
+              "timings": "03:00 - 03:30"
+            }
           ]
         }
       ],
-
+      
       "stations": {
         "ST01": {
           "station_name": "Station 1",
@@ -187,5 +205,43 @@
         }
       }
     }
+  },
+  "person_tracking": {
+    "enabled": true,
+    "draw_rois": false,
+    "detector": "yolov8n.pt",
+    "reid_weights": "osnet_x1_0_msmt17.pt",
+    "with_reid": true,
+    "imgsz": 960,
+    "det_conf": 0.3,
+    "track_high_thresh": 0.5,
+    "new_track_thresh": 0.65,
+    "track_buffer_s": 3.0,
+    "frame_rate": 10,
+    "gmc_method": "none",
+    "max_ids": 0,
+    "confirm_frames": 10,
+    "confirm_min_conf": 0.5,
+    "reid_assign_max": 0.22,
+    "reid_new_id_min": 0.3,
+    "reid_gallery_accept": 0.25,
+    "gallery_size": 40,
+    "gallery_learn_min": 10,
+    "gallery_every": 5,
+    "occlusion_iou": 0.15,
+    "lost_after_frames": 2,
+    "draw_outside_people": false,
+    "roi": [
+      [211, 524],
+      [1360, 294],
+      [1709, 429],
+      [1784, 689],
+      [1735, 872],
+      [1411, 758],
+      [622, 1073],
+      [297, 1069]
+    ],
+    "roi_margin_px": 40,
+    "roi_point": "centroid"
   }
 }
