@@ -42,7 +42,7 @@
     "log_retention_days": 7,
     "overrides": {
       "gallery_mode": "frozen",
-      "learn_s": 180,
+      "learn_s": 240,
       "gallery_size": 60,
       "confirm_min_conf": 0.5,
 

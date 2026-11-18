@@ -312,6 +312,7 @@ class Pending:
     last_seen: int = 0
     was_gid: int | None = None  # set when this track lost its ID: it may only go back to an existing ID
     near: tuple | None = None  # (nearest gid, dist, holder track or None) for the overlay
+    apart: dict = field(default_factory=dict)  # gid -> frames this track was on screen far from that person
 
 
 class GlobalIDManager:
@@ -485,6 +486,16 @@ class GlobalIDManager:
             if lid not in seen_lids and frame_idx - self.pending[lid].last_seen > self.a.confirm_frames:
                 del self.pending[lid]  # track died before being confirmed -> false positive / flicker
 
+        if self.a.apart_frames > 0 and self.pending and linked_idx:
+            for i, lid in enumerate(local_ids):
+                pend = self.pending.get(lid)
+                if pend is None or lid in self.local2gid:
+                    continue
+                for gid, j in linked_idx.items():
+                    if (ious[i, j] < self.a.apart_iou
+                            and np.linalg.norm(foot(boxes[i]) - foot(boxes[j])) / self.diag > self.a.apart_dist):
+                        pend.apart[gid] = pend.apart.get(gid, 0) + 1
+
         self._update_contacts(frame_idx, linked_idx, boxes)
         if verify_tick:
             self._verify(frame_idx, linked_idx, embs, local_ids, boxes, out, confs)
@@ -532,6 +543,15 @@ class GlobalIDManager:
                 app = all_d.get(p.gid, 1.0)
                 limit = self.a.keep_dist if p.gid == pend.was_gid else self.a.assign_app_max
                 if app > limit:  # appearance must pass ON ITS OWN
+                    continue
+                # Co-visibility: this track was on screen, far from and not overlapping with, this
+                # person's own track for >= apart_frames frames -> two different people. It may not
+                # take the ID when the person is hidden for a moment (occlusion), whether she is
+                # standing or walking. Not applied if the old holder fitted this ID worse than we do
+                # (then the holder was the wrong one).
+                if (self.a.apart_frames > 0 and p.gid != pend.was_gid
+                        and pend.apart.get(p.gid, 0) >= self.a.apart_frames
+                        and (p.last_d is None or p.last_d[1] <= app + self.a.apart_fit_margin)):
                     continue
                 if p.gid != pend.was_gid and occupied_best < app - self.a.rank_margin:
                     continue  # someone already on screen looks more like this track -> ambiguous
@@ -1036,6 +1056,13 @@ def parse_args():
     ap.add_argument("--refresh-min-conf", type=float, default=0.70, help="min detection confidence")
     ap.add_argument("--refresh-settle-s", type=float, default=30,
                     help="no refresh this long after an ID was (re)bound / swapped / moved")
+    ap.add_argument("--apart-frames", type=int, default=5,
+                    help="a track seen this many frames on screen far from person P (not overlapping) "
+                         "can never take P's ID when P is hidden briefly (0 = off)")
+    ap.add_argument("--apart-dist", type=float, default=0.08, help="'far apart' = feet farther than this (diag fraction)")
+    ap.add_argument("--apart-iou", type=float, default=0.05, help="... and boxes overlapping less than this")
+    ap.add_argument("--apart-fit-margin", type=float, default=0.03,
+                    help="not applied if the old holder fitted the ID worse than the new track by more than this")
     ap.add_argument("--contact-iou", type=float, default=0.2, help="IoU that counts as two people overlapping")
     ap.add_argument("--contact-memory-s", type=float, default=20, help="no gallery learning this long after overlap")
     # run control
