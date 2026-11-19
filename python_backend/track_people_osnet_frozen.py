@@ -291,6 +291,7 @@ class Person:
     last_d: tuple | None = None  # (frame, own dist) from the latest embedding of this person
     last_refresh: int = 0  # frame of the last periodic gallery refresh (or of the freeze)
     refreshes: int = 0  # how many refresh samples were learnt
+    contact_frame: int = -10**9  # last frame this person overlapped another tracked person
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -613,6 +614,7 @@ class GlobalIDManager:
                 iou = iou_matrix(boxes[[linked_idx[ga]]], boxes[[linked_idx[gb]]])[0, 0]
                 if iou > self.a.contact_iou:
                     self.contacts[frozenset((ga, gb))] = frame_idx
+                    self.people[ga].contact_frame = self.people[gb].contact_frame = frame_idx
         horizon = self.a.contact_memory_s * self.fps
         for k in [k for k, f in self.contacts.items() if frame_idx - f > horizon]:
             del self.contacts[k]
@@ -761,6 +763,12 @@ class GlobalIDManager:
             # the track that has carried this ID since the person first appeared needs much stronger
             # evidence: its OWN match must really be poor, not just a bit worse than another ID's
             stable = p.bind_how == "new" and frame_idx - p.bind_frame >= self.a.stable_s * self.fps
+            # ... and so does ANY binding (also a re-link) that has carried this ID, on the same track
+            # and without overlapping anybody, for stable_s: a continuous, undisturbed track keeps its
+            # ID unless its own match is really poor (> keep_dist). A noisy 0.22-vs-0.13 reading must
+            # not hand an absent person's ID to somebody who already has one.
+            calm = frame_idx - max(p.bind_frame, p.contact_frame) >= self.a.stable_s * self.fps
+            stable = stable or calm
             margin = self.a.stable_margin if stable else self.a.verify_margin
             if (alt_g is not None and alt_d <= self.a.assign_app_max and alt_d < own - margin
                     and (not stable or own > self.a.keep_dist)):
