@@ -118,6 +118,15 @@ def l2n(v: np.ndarray) -> np.ndarray:
     return v / (np.linalg.norm(v) + 1e-12)
 
 
+# Inspection persons live in their OWN ID pool: gid 1001, 1002 ... shown as I1, I2 ...
+# Operators / 'Person' class keep gid 1, 2, ... shown as P1, P2 ... The two pools never mix.
+INSP_BASE = 1000
+
+
+def pid_name(gid: int) -> str:
+    return f"I{gid - INSP_BASE}" if gid >= INSP_BASE else f"P{gid}"
+
+
 # --------------------------------------------------------------------------- #
 # Appearance encoders (self-contained; no dependency on Ultralytics' ReID class)
 # --------------------------------------------------------------------------- #
@@ -292,6 +301,7 @@ class Person:
     last_refresh: int = 0  # frame of the last periodic gallery refresh (or of the freeze)
     refreshes: int = 0  # how many refresh samples were learnt
     contact_frame: int = -10**9  # last frame this person overlapped another tracked person
+    group: int = 0  # 0 = Person / operator IDs (P1..), 1 = inspection IDs (I1..): never shared
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -314,6 +324,7 @@ class Pending:
     was_gid: int | None = None  # set when this track lost its ID: it may only go back to an existing ID
     near: tuple | None = None  # (nearest gid, dist, holder track or None) for the overlay
     apart: dict = field(default_factory=dict)  # gid -> frames this track was on screen far from that person
+    group: int = 0  # class group of this track (0 = Person, 1 = inspection)
 
 
 class GlobalIDManager:
@@ -341,11 +352,22 @@ class GlobalIDManager:
         self.pending: dict[int, Pending] = {}
         self.contacts: dict[frozenset, int] = {}  # {gidA,gidB} -> last frame they overlapped
         self.next_gid = 1
+        self.next_insp = INSP_BASE + 1
 
     # -- helpers ----------------------------------------------------------- #
+    def name(self, gid: int) -> str:
+        return pid_name(gid)
+
+    def cap(self, group: int) -> int:
+        return self.a.max_ids if group == 0 else getattr(self.a, "max_insp_ids", 6)
+
+    def full_for(self, group: int) -> bool:
+        """Closed set per pool: P-IDs and I-IDs are counted separately."""
+        return sum(1 for p in self.people.values() if p.group == group) >= self.cap(group)
+
     @property
-    def full(self) -> bool:
-        return len(self.people) >= self.a.max_ids
+    def full(self) -> bool:  # kept for the standalone script's summary line
+        return self.full_for(0)
 
     def near_edge(self, box) -> bool:
         m = self.a.edge_margin
@@ -384,7 +406,7 @@ class GlobalIDManager:
         if n >= self.a.gallery_size or (p.frames_seen >= self.a.learn_s * self.fps and n >= self.a.learn_min):
             p.frozen = True
             p.last_refresh = frame_idx
-            self.log(frame_idx, f"GALLERY FROZEN P{p.gid}: {n} samples after {p.frames_seen / self.fps:.0f}s seen")
+            self.log(frame_idx, f"GALLERY FROZEN {self.name(p.gid)}: {n} samples after {p.frames_seen / self.fps:.0f}s seen")
 
     def update_home(self, p: Person, box):
         if p.frozen:
@@ -404,21 +426,43 @@ class GlobalIDManager:
         p.bind_how = ""
 
     def new_person(self, pend: Pending, box, frame_idx) -> Person:
-        p = Person(gid=self.next_gid, first_frame=pend.first_frame, last_frame=frame_idx, last_box=box.copy())
+        if pend.group == 0:
+            gid, self.next_gid = self.next_gid, self.next_gid + 1
+        else:
+            gid, self.next_insp = self.next_insp, self.next_insp + 1
+        p = Person(gid=gid, first_frame=pend.first_frame, last_frame=frame_idx, last_box=box.copy(),
+                   group=pend.group)
         p.gallery = []
         p.history = deque(maxlen=self.a.verify_window)
         for e in pend.embs:
             self.add_to_gallery(p, e, frame_idx)
         self.update_home(p, box)
         self.people[p.gid] = p
-        self.next_gid += 1
         return p
 
     # -- main update ------------------------------------------------------- #
-    def update(self, frame_idx: int, local_ids, boxes, confs, embed_fn):
-        """Returns list of (local_id, gid or -1, state, app_dist) aligned with inputs."""
+    def update(self, frame_idx: int, local_ids, boxes, confs, embed_fn, groups=None):
+        """Returns list of (local_id, gid or -1, state, app_dist) aligned with inputs.
+        groups: class group of every box (0 = Person, 1 = inspection); None = everybody is group 0.
+        An ID is only ever given to a track of the SAME group."""
         n = len(local_ids)
         out = [None] * n
+        grp = [int(g) for g in groups] if groups is not None else [0] * n
+
+        # A linked track whose class group changed (BoT-SORT crossed an inspection person with an
+        # operator, or the class vote flipped) cannot keep an ID of the other pool: release it.
+        for i, lid in enumerate(local_ids):
+            gid = self.local2gid.get(lid)
+            if gid is not None and self.people[gid].group != grp[i]:
+                p = self.people[gid]
+                del self.local2gid[lid]
+                if p.local_id == lid:
+                    p.local_id = None
+                p.history.clear()
+                p.reassigns += 1
+                self.log(frame_idx, f"UNLABEL track {lid}: was {self.name(gid)} - the track is now "
+                                    f"{'an inspection person' if grp[i] else 'a Person'}")
+
         ious = iou_matrix(boxes, boxes)
         np.fill_diagonal(ious, 0)
         clean = (ious.max(axis=1) if n > 1 else np.zeros(n)) < self.a.occlusion_iou
@@ -463,6 +507,7 @@ class GlobalIDManager:
                 pend = self.pending.get(lid)
                 if pend is None:
                     pend = self.pending[lid] = Pending(lid, frame_idx, box.copy())
+                pend.group = grp[i]
                 pend.frames += 1
                 pend.last_seen = frame_idx
                 pend.confs.append(float(confs[i]))
@@ -531,16 +576,19 @@ class GlobalIDManager:
             return
         max_gap = self.a.max_lost_s * self.fps
         cands = [p for p in self.people.values()
-                 if p.local_id is None and (self.full or frame_idx - p.last_frame <= max_gap)]
+                 if p.local_id is None and (self.full_for(p.group) or frame_idx - p.last_frame <= max_gap)]
         costs = np.full((len(ready), len(cands)), 9.0, dtype=np.float32)
         details, queries, nearest_all = {}, {}, {}
         for r, i in enumerate(ready):
             pend = self.pending[local_ids[i]]
             q = queries[r] = l2n(np.mean(pend.embs, axis=0))
-            all_d = {g: p.appearance_dist(q) for g, p in self.people.items() if p.gallery}
+            all_d = {g: p.appearance_dist(q) for g, p in self.people.items()
+                     if p.gallery and p.group == pend.group}   # compare only with the SAME pool
             nearest_all[r] = sorted(all_d.items(), key=lambda kv: kv[1])
             occupied_best = min((d for g, d in all_d.items() if self.people[g].local_id is not None), default=9.0)
             for c, p in enumerate(cands):
+                if p.group != pend.group:
+                    continue  # an inspection person never gets a P-ID (and vice versa)
                 app = all_d.get(p.gid, 1.0)
                 limit = self.a.keep_dist if p.gid == pend.was_gid else self.a.assign_app_max
                 if app > limit:  # appearance must pass ON ITS OWN
@@ -576,20 +624,21 @@ class GlobalIDManager:
                 how = "back" if p.gid == pend.was_gid else ("re-entry" if p.exited else "occlusion/miss")
                 self.bind(p, lid, boxes[i], frame_idx)
                 p.bind_how = "relink"
-                self.log(frame_idx, f"RELINK track {lid} -> P{p.gid} ({how}) gap={gap_s:.1f}s "
+                self.log(frame_idx, f"RELINK track {lid} -> {self.name(p.gid)} ({how}) gap={gap_s:.1f}s "
                                     f"app_dist={app:.2f} prior={prior:.2f}")
                 out[i] = (lid, p.gid, "relinked", app)
                 continue
             near = nearest_all[r]
-            if (not self.full and pend.was_gid is None
+            if (not self.full_for(pend.group) and pend.was_gid is None
                     and (not near or near[0][1] > self.a.new_id_min_dist)):
                 del self.pending[lid]
                 p = self.new_person(pend, boxes[i], frame_idx)
                 self.bind(p, lid, boxes[i], frame_idx)
                 p.bind_how = "new"
-                txt = f" (nearest P{near[0][0]} dist={near[0][1]:.2f})" if near else ""
-                self.log(frame_idx, f"NEW P{p.gid} from track {lid}{txt}"
-                                    + (f"  [all {self.a.max_ids} IDs now created]" if self.full else ""))
+                txt = f" (nearest {self.name(near[0][0])} dist={near[0][1]:.2f})" if near else ""
+                self.log(frame_idx, f"NEW {self.name(p.gid)} from track {lid}{txt}"
+                                    + (f"  [all {self.cap(pend.group)} {'I' if pend.group else 'P'}-IDs now created]"
+                                       if self.full_for(pend.group) else ""))
                 out[i] = (lid, p.gid, "new", -1.0)
             else:
                 if near:
@@ -598,10 +647,10 @@ class GlobalIDManager:
                     if near:
                         g, dd = near[0]
                         holder = self.people[g].local_id
-                        why = f"nearest P{g} dist={dd:.2f} ({f'held by track {holder}' if holder is not None else 'free'})"
+                        why = f"nearest {self.name(g)} dist={dd:.2f} ({f'held by track {holder}' if holder is not None else 'free'})"
                     else:
                         why = "no galleries"
-                    was = f" (was P{pend.was_gid})" if pend.was_gid else ""
+                    was = f" (was {self.name(pend.was_gid)})" if pend.was_gid else ""
                     self.log(frame_idx, f"UNKNOWN track {lid}{was}: no ID passes the appearance test — {why}")
                 out[i] = (lid, -1, "unknown", near[0][1] if near else -1.0)
 
@@ -627,9 +676,9 @@ class GlobalIDManager:
         p.history.clear()
         p.reassigns += 1
         pend = Pending(lid, frame_idx, box.copy(), embs=[e], confs=[1.0] * self.a.confirm_frames,
-                       frames=self.a.confirm_frames, last_seen=frame_idx, was_gid=p.gid)
+                       frames=self.a.confirm_frames, last_seen=frame_idx, was_gid=p.gid, group=p.group)
         self.pending[lid] = pend
-        self.log(frame_idx, f"UNLABEL track {lid}: was P{p.gid} — {why}")
+        self.log(frame_idx, f"UNLABEL track {lid}: was {self.name(p.gid)} — {why}")
         out[i] = (lid, -1, "unknown", own)
 
     def _refresh_galleries(self, frame_idx, linked_idx, dists, verdicts, embs, boxes, confs):
@@ -677,8 +726,8 @@ class GlobalIDManager:
                 del p.gallery[k + int(S.max(axis=1).argmax())]
             p.last_refresh = frame_idx
             p.refreshes += 1
-            self.log(frame_idx, f"GALLERY REFRESH P{gid}: +1 sample (own={own:.2f}, nearest "
-                                f"P{alt_g}={alt_d:.2f}) gallery={len(p.gallery)} refreshes={p.refreshes}")
+            self.log(frame_idx, f"GALLERY REFRESH {self.name(gid)}: +1 sample (own={own:.2f}, nearest "
+                                f"{self.name(alt_g)}={alt_d:.2f}) gallery={len(p.gallery)} refreshes={p.refreshes}")
 
     def _contact_swap_check(self, frame_idx, linked_idx, embs, local_ids, boxes, out):
         """Two people overlapped and came apart with their tracker ids CROSSED (BoT-SORT gave
@@ -700,6 +749,8 @@ class GlobalIDManager:
             if ga not in linked_idx or gb not in linked_idx:
                 continue
             pa, pb = self.people[ga], self.people[gb]
+            if pa.group != pb.group:
+                continue  # never swap an inspection person with an operator
             if len(pa.gallery) < a.learn_min or len(pb.gallery) < a.learn_min:
                 continue
             if pa.frames_seen < learn_frames or pb.frames_seen < learn_frames:
@@ -727,7 +778,7 @@ class GlobalIDManager:
                 q.reassigns += 1
                 q.bind_frame = frame_idx
                 q.bind_how = "swap"
-            self.log(frame_idx, f"SWAP P{ga}<->P{gb} (tracks {lid},{lid2}) after overlap: "
+            self.log(frame_idx, f"SWAP {self.name(ga)}<->{self.name(gb)} (tracks {lid},{lid2}) after overlap: "
                                 f"straight={straight:.2f} crossed={crossed:.2f}")
             out[i] = (lid, gb, "swapped", di[gb])
             out[j] = (lid2, ga, "swapped", dj[ga])
@@ -751,7 +802,8 @@ class GlobalIDManager:
             ph = self.people[gid].heights
             partial = len(ph) >= 30 and h < self.a.partial_h_ratio * float(np.median(ph))
             if gid in mature and embs.get(i) is not None and not partial:  # full, clean views only
-                dists[gid] = {g: q.appearance_dist(embs[i]) for g, q in mature.items()}
+                dists[gid] = {g: q.appearance_dist(embs[i]) for g, q in mature.items()
+                              if q.group == self.people[gid].group}
         for gid, D in dists.items():
             p = self.people[gid]
             if p.frames_seen < learn_frames:
@@ -790,7 +842,7 @@ class GlobalIDManager:
                 continue
             i = linked_idx[gid]
             lid = local_ids[i]
-            why = f"own dist={own:.2f}" + (f", looks like P{alt_g} ({alt_d:.2f})" if alt_g else "") + \
+            why = f"own dist={own:.2f}" + (f", looks like {self.name(alt_g)} ({alt_d:.2f})" if alt_g else "") + \
                   f", {list(p.history).count(v)}/{len(p.history)} checks"
             if v.startswith("move:"):
                 q = self.people[alt_g]
@@ -802,7 +854,7 @@ class GlobalIDManager:
                     q.reassigns += 1
                     self.bind(q, lid, boxes[i], frame_idx)
                     q.bind_how = "move"
-                    self.log(frame_idx, f"MOVE track {lid}: P{gid} -> P{alt_g} ({why})")
+                    self.log(frame_idx, f"MOVE track {lid}: {self.name(gid)} -> {self.name(alt_g)} ({why})")
                     out[i] = (lid, alt_g, "reassigned", alt_d)
                     del linked_idx[gid]
                     linked_idx[alt_g] = i
@@ -821,7 +873,7 @@ class GlobalIDManager:
                         q.reassigns += 1
                         p.bind_frame = q.bind_frame = frame_idx
                         p.bind_how = q.bind_how = "swap"
-                        self.log(frame_idx, f"SWAP P{gid}<->P{alt_g} (tracks {lid},{lid2}): "
+                        self.log(frame_idx, f"SWAP {self.name(gid)}<->{self.name(alt_g)} (tracks {lid},{lid2}): "
                                             f"straight={own + D2[alt_g]:.2f} crossed={alt_d + D2[gid]:.2f}")
                         out[i] = (lid, alt_g, "swapped", alt_d)
                         out[j] = (lid2, gid, "swapped", D2[gid])
@@ -941,15 +993,15 @@ def draw_debug(vis, fi, results, boxes, confs, mgr, args, track_events, recent_e
             ld = p.last_d if p.last_d and fi - p.last_d[0] <= stale else None
             own = lc[1] if lc else (ld[1] if ld else None)
             ok = own is not None and own <= args.assign_app_max
-            lines.append((f"d(P{gid})={_fmt_d(own)}  conf={cf:.2f}", (0, 255, 0) if ok else (0, 200, 255)))
+            lines.append((f"d({mgr.name(gid)})={_fmt_d(own)}  conf={cf:.2f}", (0, 255, 0) if ok else (0, 200, 255)))
             if lc and lc[2] is not None:
-                lines.append((f"next P{lc[2]}={_fmt_d(lc[3])}", (200, 200, 200)))
+                lines.append((f"next {mgr.name(lc[2])}={_fmt_d(lc[3])}", (200, 200, 200)))
         else:
             pend = mgr.pending.get(lid)
             if pend is not None and pend.near:
                 g, dd, holder = pend.near
                 who = f"held t{holder}" if holder is not None else "free"
-                lines.append((f"? nearest P{g}={_fmt_d(dd)} ({who}) conf={cf:.2f}", (0, 200, 255)))
+                lines.append((f"? nearest {mgr.name(g)}={_fmt_d(dd)} ({who}) conf={cf:.2f}", (0, 200, 255)))
                 lines.append((f"needs <= {args.assign_app_max:.2f} to get an ID", (180, 180, 180)))
             else:
                 lines.append((f"? waiting ({state}) conf={cf:.2f}", (180, 180, 180)))
@@ -973,8 +1025,8 @@ def draw_debug(vis, fi, results, boxes, confs, mgr, args, track_events, recent_e
         ld = p.last_d if p.last_d and fi - p.last_d[0] <= stale else None
         own = lc[1] if lc else (ld[1] if ld else None)
         trk = f"t{p.local_id}" if p.local_id is not None else "lost"
-        nxt = f"P{lc[2]}={_fmt_d(lc[3])}" if lc and lc[2] is not None else ""
-        y += _text(vis, f"P{g:<2} {trk:>6}  {_fmt_d(own):>5}  {nxt}", (x0, y), 0.45, color_for(g))
+        nxt = f"{mgr.name(lc[2])}={_fmt_d(lc[3])}" if lc and lc[2] is not None else ""
+        y += _text(vis, f"{mgr.name(g):<3} {trk:>6}  {_fmt_d(own):>5}  {nxt}", (x0, y), 0.45, color_for(g))
     # recent events panel
     y = H - 10 - 18 * len(recent_events)
     for f, msg in recent_events:
@@ -1001,6 +1053,8 @@ def parse_args():
                     help="OSNet .pt (PyTorch) or person-ReID .onnx for step 4 (default: REID_MODEL in config block)")
     # long-term layer
     ap.add_argument("--max-ids", type=int, default=MAX_IDS, help="closed set: never more than this many people")
+    ap.add_argument("--max-insp-ids", type=int, default=6,
+                    help="closed set of INSPECTION persons (own pool: I1, I2 ...), separate from --max-ids")
     ap.add_argument("--confirm-frames", type=int, default=10)
     ap.add_argument("--confirm-min-conf", type=float, default=0.6, help="median det conf needed to confirm a track")
     # appearance thresholds (1 - cosine sim to a person's gallery, top-3 mean). Calibrated on the
@@ -1171,7 +1225,7 @@ def main():
             col = color_for(gid)
             p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
             cv2.rectangle(vis, p1, p2, col, 2)
-            label = f"P{gid}" if gid > 0 else f"? t{lid}"
+            label = pid_name(gid) if gid > 0 else f"? t{lid}"
             if state in ("relinked", "swapped", "reassigned"):
                 label += " " + {"relinked": "RELINK", "swapped": "SWAP", "reassigned": "MOVE"}[state]
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -1205,7 +1259,7 @@ def main():
     # summary
     log(fi, "=== SUMMARY ===")
     for p in sorted(mgr.people.values(), key=lambda p: p.gid):
-        log(fi, f"P{p.gid}: first={p.first_frame / fps:.1f}s last={p.last_frame / fps:.1f}s "
+        log(fi, f"{pid_name(p.gid)}: first={p.first_frame / fps:.1f}s last={p.last_frame / fps:.1f}s "
                 f"frames={p.frames_seen} relinks={p.relinks} swaps/moves={p.reassigns} path={p.path_px:.0f}px gallery={len(p.gallery)}"
                 f"{' (frozen)' if p.frozen else ''}")
     cap.release()

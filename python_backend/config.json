@@ -28,7 +28,8 @@
   "tracking": {
     "person_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_imvd_prsn_171126.pt",
     "reid_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
-    "max_ids": 15,
+    "max_ids": 12,
+    "max_insp_ids": 6,
     "person_classes": ["Person", "Inspection_Person"],
     "non_operator_classes": ["Inspection_Person"],
     "show_outside_roi": false,

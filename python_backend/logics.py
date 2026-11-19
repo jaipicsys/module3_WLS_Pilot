@@ -17,6 +17,7 @@ from config_utils import (
     resolve_model_path,
 )
 from person_tracking import PersonTracker
+from track_people_osnet_frozen import pid_name as tp_name  # P3 for operators, I1 for inspection persons
 
 ACTIVE = "active_work"
 IDLE = "idle"
@@ -859,9 +860,9 @@ class FrameLogic:
             if i in assigned:
                 continue
             x1, y1, x2, y2 = map(int, t["box"])
-            tag = f"P{t['gid']}" if t["gid"] > 0 else f"? t{t['lid']}"
-            if t.get("inspection"):
-                tag += " INSP"
+            tag = tp_name(t["gid"]) if t["gid"] > 0 else f"? t{t['lid']}"
+            if t.get("outside"):
+                tag += " (out)"
             cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_TRACK, 2)
             cv2.putText(frame, tag, (x1 + 4, y1 + 26), FONT, 0.8, COLOR_TRACK, 2)
 

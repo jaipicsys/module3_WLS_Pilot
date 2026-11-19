@@ -49,7 +49,7 @@ from config_utils import BASE_DIR, CONFIG, resolve_model_path
 _ARGS_LOCK = threading.Lock()
 
 TRACKS_HEADER = ("frame,time_s,global_id,track_id,state,x1,y1,x2,y2,w,h,cx,cy,"
-                 "foot_x,foot_y,conf,app_dist,next_id,next_dist\n")
+                 "foot_x,foot_y,conf,app_dist,next_id,next_dist,cls\n")
 
 
 def _default_args():
@@ -98,6 +98,7 @@ class PersonTracker:
         # ---- tracker options: script defaults, then config.json ----
         self.args = _default_args()
         self.args.max_ids = cfg.get("max_ids", self.args.max_ids)
+        self.args.max_insp_ids = cfg.get("max_insp_ids", self.args.max_insp_ids)  # pool I1, I2 ...
         self.args.device = device
         for key, value in cfg.get("overrides", {}).items():
             if not hasattr(self.args, key):
@@ -123,6 +124,9 @@ class PersonTracker:
         self.person_classes = _resolve_classes(cfg.get("person_classes"), [self.person_class], _names)
         self.non_operator_classes = set(_resolve_classes(cfg.get("non_operator_classes"), [], _names))
         self._cls_votes = {}   # tracker id -> (recent class ids, last frame seen)
+        # Debug: also show people OUTSIDE the station ROI in the video (thin box + "(out)").
+        # Default False = as before; inspection persons are always shown.
+        self.show_outside_roi = bool(cfg.get("show_outside_roi", False))
         print(f"[INFO] {camera_id}: tracking classes "
               f"{[f'{c}:{_names[c]}' for c in self.person_classes]}"
               + (f", non-operator {[_names[c] for c in sorted(self.non_operator_classes)]}"
@@ -245,11 +249,12 @@ class PersonTracker:
                   f"stable={a.stable_s}s/{a.stable_margin} partial_h={a.partial_h_ratio} "
                   f"max_radius={a.max_radius} confirm_min_conf={a.confirm_min_conf}")
 
-    def _write_tracks(self, fi, results, boxes, confs):
+    def _write_tracks(self, fi, results, boxes, confs, clss=None):
         """Same rows as track_people_osnet_frozen.py: every detected box (not only the ROI)."""
         self._maybe_rotate_logs()
         ts = fi / self.mgr.fps
-        for (lid, gid, state, d), box, cf in zip(results, boxes, confs):
+        clss = clss if clss is not None else [self.person_classes[0]] * len(results)
+        for (lid, gid, state, d), box, cf, cl in zip(results, boxes, confs, clss):
             x1, y1, x2, y2 = box
             fx, fy = (x1 + x2) / 2.0, y2
             nid, nd = -1, -1.0
@@ -261,7 +266,7 @@ class PersonTracker:
             self._tracks_f.write(
                 f"{fi},{ts:.3f},{gid},{lid},{state},{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f},"
                 f"{x2 - x1:.1f},{y2 - y1:.1f},{(x1 + x2) / 2:.1f},{(y1 + y2) / 2:.1f},"
-                f"{fx:.1f},{fy:.1f},{cf:.3f},{d:.3f},{nid},{nd:.3f}\n")
+                f"{fx:.1f},{fy:.1f},{cf:.3f},{d:.3f},{nid},{nd:.3f},{cl}\n")
 
     def write_summary(self):
         """Same '=== SUMMARY ===' block the standalone script writes when it stops."""
@@ -271,7 +276,7 @@ class PersonTracker:
             fi, fps = self.frame_idx, self.mgr.fps
             self._log(fi, "=== SUMMARY ===")
             for p in sorted(self.mgr.people.values(), key=lambda p: p.gid):
-                self._log(fi, f"P{p.gid}: first={p.first_frame / fps:.1f}s "
+                self._log(fi, f"{tp.pid_name(p.gid)}: first={p.first_frame / fps:.1f}s "
                               f"last={p.last_frame / fps:.1f}s frames={p.frames_seen} "
                               f"relinks={p.relinks} swaps/moves={p.reassigns} "
                               f"path={p.path_px:.0f}px gallery={len(p.gallery)}"
@@ -306,7 +311,7 @@ class PersonTracker:
                 continue
             if x2 - x1 < 40 or y2 - y1 < 100:
                 continue
-            folder = self.run_dir / "crops" / self._crop_session / f"P{gid}"
+            folder = self.run_dir / "crops" / self._crop_session / tp.pid_name(gid)
             folder.mkdir(parents=True, exist_ok=True)
             name = f"f{fi:07d}_t{lid}_d{d:.2f}.jpg"
             cv2.imwrite(str(folder / name), frame[y1:y2, x1:x2])
@@ -432,10 +437,14 @@ class PersonTracker:
         # Mirror the independent script: all detected people reach GlobalIDManager.
         # Apply Station ROI only to the returned tracks used by station/operator logic.
         fi = self.frame_idx
+        stable = [self._track_class(int(l), int(c), fi) for l, c in zip(lids, clss)]
+        # Inspection persons have their own ID pool (I1, I2 ...): the manager only ever gives a
+        # track an ID of its own pool, so an inspection person can never receive a P-ID.
+        groups = [1 if c in self.non_operator_classes else 0 for c in stable]
         all_results = self.mgr.update(
-            fi, lids, boxes, confs, lambda bx: self.encoder(frame, bx)
+            fi, lids, boxes, confs, lambda bx: self.encoder(frame, bx), groups=groups
         )
-        self._write_tracks(fi, all_results, boxes, confs)
+        self._write_tracks(fi, all_results, boxes, confs, stable)
         try:
             self._save_crops(fi, frame, all_results, boxes, confs)
         except Exception as exc:  # noqa: BLE001  (crops must never break tracking)
@@ -443,14 +452,17 @@ class PersonTracker:
         self.frame_idx += 1
 
         visible = []
-        for (lid, gid, state, d), box, cf, cl in zip(all_results, boxes, confs, clss):
-            cl = self._track_class(int(lid), int(cl), fi)
-            if self.roi is not None and not self._in_roi(box):
+        for (lid, gid, state, d), box, cf, cl in zip(all_results, boxes, confs, stable):
+            insp = cl in self.non_operator_classes
+            inside = self.roi is None or self._in_roi(box)
+            # Station logic only sees people inside the ROI - except inspection persons (always
+            # shown with their P-ID, never bound to an operator) and, if enabled, everybody.
+            if not inside and not insp and not self.show_outside_roi:
                 continue
             visible.append(
                 {"gid": int(gid), "lid": int(lid), "state": state, "box": box,
                  "conf": float(cf), "app_dist": float(d), "fi": fi,
-                 "cls": cl, "inspection": cl in self.non_operator_classes}
+                 "cls": cl, "inspection": insp, "outside": not inside}
             )
         self._debug_tracks = visible
         return visible
