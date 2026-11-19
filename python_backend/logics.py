@@ -391,7 +391,9 @@ class FrameLogic:
         if not open_ops:
             return
 
-        visible = {t["gid"]: t for t in self.tracks if t["gid"] > 0}
+        # Inspection persons are tracked (they have P-IDs) but are never operators.
+        visible = {t["gid"]: t for t in self.tracks
+                   if t["gid"] > 0 and not t.get("inspection")}
         taken = {b.gid for b in self.bindings.values() if b.gid is not None}
 
         pairs = []
@@ -858,6 +860,8 @@ class FrameLogic:
                 continue
             x1, y1, x2, y2 = map(int, t["box"])
             tag = f"P{t['gid']}" if t["gid"] > 0 else f"? t{t['lid']}"
+            if t.get("inspection"):
+                tag += " INSP"
             cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_TRACK, 2)
             cv2.putText(frame, tag, (x1 + 4, y1 + 26), FONT, 0.8, COLOR_TRACK, 2)
 

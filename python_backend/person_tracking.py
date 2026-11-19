@@ -64,6 +64,23 @@ def _default_args():
             sys.argv = saved
 
 
+def _resolve_classes(spec, default, names):
+    """Class ids from a config list that may hold ids (5) or names ("Inspection_Person")."""
+    by_name = {str(v).lower(): int(k) for k, v in names.items()}
+    out = []
+    for c in (default if spec is None else spec):
+        if isinstance(c, str) and not c.strip().isdigit():
+            if c.strip().lower() not in by_name:
+                raise ValueError(f"tracking class '{c}' is not in the person model: {names}")
+            out.append(by_name[c.strip().lower()])
+        else:
+            cid = int(c)
+            if cid not in {int(k) for k in names}:
+                raise ValueError(f"tracking class id {cid} is not in the person model: {names}")
+            out.append(cid)
+    return list(dict.fromkeys(out))  # no duplicates, order kept
+
+
 class PersonTracker:
     def __init__(self, camera_id, device, half, fallback_weights=None, fallback_class=0,
                  roi=None):
@@ -97,6 +114,19 @@ class PersonTracker:
         else:
             raise ValueError("tracking.person_model is not set in config.json")
         self.model = YOLO(weights)
+
+        # ---- which classes are tracked as people (default: only person_class, as before) ----
+        # tracking.person_classes      e.g. ["Person", "Inspection_Person"] (names or ids)
+        # tracking.non_operator_classes e.g. ["Inspection_Person"]: tracked and shown with a
+        #     P-ID, but never bound to an operator seat by the station logic.
+        _names = {int(k): str(v) for k, v in self.model.names.items()}
+        self.person_classes = _resolve_classes(cfg.get("person_classes"), [self.person_class], _names)
+        self.non_operator_classes = set(_resolve_classes(cfg.get("non_operator_classes"), [], _names))
+        self._cls_votes = {}   # tracker id -> (recent class ids, last frame seen)
+        print(f"[INFO] {camera_id}: tracking classes "
+              f"{[f'{c}:{_names[c]}' for c in self.person_classes]}"
+              + (f", non-operator {[_names[c] for c in sorted(self.non_operator_classes)]}"
+                 if self.non_operator_classes else ""))
 
         # ---- appearance model (OSNet .pt or .onnx) ----
         if not cfg.get("reid_model"):
@@ -152,9 +182,10 @@ class PersonTracker:
         # Warm-up: first calls are slow (CUDA init); do them before the stream starts.
         _dummy = np.zeros((1080, 1920, 3), np.uint8)
         self.model.track(_dummy, persist=True, tracker=str(self.yaml_path),
-                         classes=[self.person_class], conf=self.args.conf,
+                         classes=self.person_classes, conf=self.args.conf,
                          imgsz=self.args.imgsz, device=self.device,
-                         half=self.half, verbose=False)
+                         half=self.half, verbose=False,
+                         agnostic_nms=len(self.person_classes) > 1)
         self.encoder(_dummy, np.array([[100, 100, 200, 400]], np.float32))
         _pred = getattr(self.model, "predictor", None)
         for _t in (getattr(_pred, "trackers", None) or []):
@@ -333,9 +364,7 @@ class PersonTracker:
             tp.draw_debug(frame, fi, results, boxes, confs, self.mgr,
                           self.args, track_events, recent_events)
         except RuntimeError:
-            # The tracker thread changed mgr.people / its state while we were drawing.
-            # The overlay is only a diagnostic: skip this frame instead of failing the stream.
-            pass
+            pass  # tracker thread changed its state while drawing: skip the overlay for this frame
 
     def _measure_fps(self):
         now = time.time()
@@ -385,8 +414,10 @@ class PersonTracker:
 
         res = self.model.track(
             frame, persist=True, tracker=str(self.yaml_path),
-            classes=[self.person_class], conf=self.args.conf, imgsz=self.args.imgsz,
+            classes=self.person_classes, conf=self.args.conf, imgsz=self.args.imgsz,
             device=self.device, half=self.half, verbose=False,
+            # one human can be detected as two classes: keep only the stronger box
+            agnostic_nms=len(self.person_classes) > 1,
         )[0]
 
         b = res.boxes
@@ -394,8 +425,9 @@ class PersonTracker:
             boxes = b.xyxy.cpu().numpy().astype(np.float32)
             lids = b.id.cpu().numpy().astype(int).tolist()
             confs = b.conf.cpu().numpy()
+            clss = b.cls.cpu().numpy().astype(int).tolist()
         else:
-            boxes, lids, confs = np.zeros((0, 4), np.float32), [], np.zeros(0)
+            boxes, lids, confs, clss = np.zeros((0, 4), np.float32), [], np.zeros(0), []
 
         # Mirror the independent script: all detected people reach GlobalIDManager.
         # Apply Station ROI only to the returned tracks used by station/operator logic.
@@ -411,15 +443,30 @@ class PersonTracker:
         self.frame_idx += 1
 
         visible = []
-        for (lid, gid, state, d), box, cf in zip(all_results, boxes, confs):
+        for (lid, gid, state, d), box, cf, cl in zip(all_results, boxes, confs, clss):
+            cl = self._track_class(int(lid), int(cl), fi)
             if self.roi is not None and not self._in_roi(box):
                 continue
             visible.append(
                 {"gid": int(gid), "lid": int(lid), "state": state, "box": box,
-                 "conf": float(cf), "app_dist": float(d), "fi": fi}
+                 "conf": float(cf), "app_dist": float(d), "fi": fi,
+                 "cls": cl, "inspection": cl in self.non_operator_classes}
             )
         self._debug_tracks = visible
         return visible
+
+    def _track_class(self, lid, cls, fi):
+        """Class of a tracker id = majority of its last 15 detections, so a person who flickers
+        between 'Person' and 'Inspection_Person' does not flip between operator / non-operator."""
+        if len(self.person_classes) == 1:
+            return cls
+        votes, _ = self._cls_votes.get(lid, (deque(maxlen=15), fi))
+        votes.append(cls)
+        self._cls_votes[lid] = (votes, fi)
+        if fi % 500 == 0:  # forget tracker ids that disappeared long ago
+            for k in [k for k, (_, f) in self._cls_votes.items() if fi - f > 2000]:
+                del self._cls_votes[k]
+        return max(set(votes), key=lambda c: (list(votes).count(c), c == cls))
 
     def set_source_fps(self, fps):
         """Use the same source-FPS rule as the standalone script."""
