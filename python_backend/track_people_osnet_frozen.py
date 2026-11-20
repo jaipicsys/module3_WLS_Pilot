@@ -302,6 +302,7 @@ class Person:
     refreshes: int = 0  # how many refresh samples were learnt
     contact_frame: int = -10**9  # last frame this person overlapped another tracked person
     group: int = 0  # 0 = Person / operator IDs (P1..), 1 = inspection IDs (I1..): never shared
+    own_hist: deque = field(default_factory=lambda: deque(maxlen=60))  # own-distance readings outside overlaps
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -500,6 +501,8 @@ class GlobalIDManager:
                 if embs.get(i) is not None:
                     d = p.appearance_dist(embs[i])
                     p.last_d = (frame_idx, d)
+                    if not self.recently_in_contact(p.gid, frame_idx):
+                        p.own_hist.append(d)  # the person's NORMAL fit, never measured right after an overlap
                     if d < self.a.gallery_accept_dist and all(v == "ok" for v in p.history):
                         self.add_to_gallery(p, embs[i], frame_idx)  # no-op once frozen
                 out[i] = (lid, p.gid, "tracked", d)
@@ -764,6 +767,14 @@ class GlobalIDManager:
             dj = {g: self.people[g].appearance_dist(embs[j]) for g in (ga, gb)}
             straight, crossed = di[ga] + dj[gb], di[gb] + dj[ga]
             bad = (crossed + margin < straight and di[gb] <= a.keep_dist and dj[ga] <= a.keep_dist)
+            # A real id swap makes BOTH tracks read much worse than they normally do. Two people who just
+            # look alike do not (their own distance stays at its usual level) -> never swap those.
+            deg = getattr(a, "swap_degrade", 0.10)
+            if bad and deg > 0:
+                ra = float(np.median(pa.own_hist)) if len(pa.own_hist) >= 10 else None
+                rb = float(np.median(pb.own_hist)) if len(pb.own_hist) >= 10 else None
+                bad = (ra is not None and rb is not None
+                       and di[ga] - ra >= deg and dj[gb] - rb >= deg)
             hist = sv.setdefault(pair, deque(maxlen=5))
             hist.append(bad)
             strong = bad and (straight - crossed) >= getattr(a, "swap_strong_margin", 0.25)
@@ -898,6 +909,8 @@ class RTSPReader:
             raise RuntimeError(f"Cannot open stream {url}")
         self.q: queue.Queue = queue.Queue(maxsize=1)
         self.stopped = False
+        self.received = 0  # frames the stream delivered
+        self.dropped = 0   # frames thrown away because the tracker was still busy with the previous one
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
 
@@ -912,9 +925,11 @@ class RTSPReader:
                 time.sleep(0.01)
                 continue
             fails = 0
+            self.received += 1
             if self.q.full():
                 try:
                     self.q.get_nowait()
+                    self.dropped += 1
                 except queue.Empty:
                     pass
             self.q.put(f)
@@ -1107,6 +1122,9 @@ def parse_args():
                     help="after an overlap, swap two IDs if crossed distances are smaller by this much")
     ap.add_argument("--swap-votes", type=int, default=3,
                     help="... in this many of the last 5 checks")
+    ap.add_argument("--swap-degrade", type=float, default=0.10,
+                    help="pair swap only if BOTH tracks read at least this much worse than their own usual "
+                         "distance (0 = old behaviour: straight vs crossed only)")
     ap.add_argument("--swap-strong-margin", type=float, default=0.25,
                     help="crossed better by this much -> swap on the FIRST clean check (no voting)")
     ap.add_argument("--refresh-every-s", type=float, default=120,
