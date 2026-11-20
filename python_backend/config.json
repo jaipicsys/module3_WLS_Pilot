@@ -7,7 +7,7 @@
   "rtsp_retry_seconds": 3,
   "record_video": true,
   "record_dir": "recordings",
-  "record_fps": 10,
+  "record_fps": 13,
   "record_scale": 0.5,
   "record_segment_minutes": 30,
   "record_codec": "MJPG",
@@ -15,8 +15,9 @@
   "record_retention_days": 7,
   "plant": "Unit 1 Textile",
   "rtsp_urls": {
-    "cam1": "rtsp://192.168.2.10:8554/cam1"
+    "cam1": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/packing_13fps.mp4"
   },
+  "file_playback": "every_frame",
   "models_dir": "models",
   "pose_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/yolov8m-pose.pt",
   "operations": {
