@@ -304,6 +304,7 @@ class Person:
     group: int = 0  # 0 = Person / operator IDs (P1..), 1 = inspection IDs (I1..): never shared
     own_hist: deque = field(default_factory=lambda: deque(maxlen=60))  # own-distance readings outside overlaps
     bind_hist: deque = field(default_factory=lambda: deque(maxlen=400))  # ALL clean own-distance readings since the label was given
+    pos_hist: deque = field(default_factory=lambda: deque(maxlen=40))  # recent foot positions of FULL-size boxes (not partly hidden)
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -329,6 +330,7 @@ class Pending:
     group: int = 0  # class group of this track (0 = Person, 1 = inspection)
     held: set = field(default_factory=set)  # IDs already reported as "held back" for this track
     views: dict = field(default_factory=dict)  # gid -> recent SINGLE-view distances of this track to that person (long memory)
+    encl: dict = field(default_factory=dict)  # gid -> frames this track's box was (nearly) inside / over that person's box
 
 
 class GlobalIDManager:
@@ -377,6 +379,13 @@ class GlobalIDManager:
     def near_edge(self, box) -> bool:
         m = self.a.edge_margin
         return box[0] < m * self.W or box[1] < m * self.H or box[2] > (1 - m) * self.W or box[3] > (1 - m) * self.H
+
+    def recent_pos(self, p: Person):
+        """Where this person usually was a moment ago: median foot of their recent FULL-size boxes (the last box
+        alone can be a partly hidden one whose 'foot' sits far from where the person really stands)."""
+        if len(p.pos_hist) >= 5:
+            return np.median(np.asarray(p.pos_hist), axis=0)
+        return foot(p.last_box)
 
     def holder_fit(self, p: Person):
         """How well this person's own track USUALLY matches its ID: the median of its recent clean
@@ -511,6 +520,8 @@ class GlobalIDManager:
                 p.last_box, p.last_frame, p.local_id = box.copy(), frame_idx, lid
                 p.frames_seen += 1
                 p.heights.append(float(box[3] - box[1]))
+                if len(p.heights) < 20 or (box[3] - box[1]) >= 0.7 * float(np.median(p.heights)):
+                    p.pos_hist.append(foot(box))
                 self.maybe_freeze(p, frame_idx)
                 self.update_home(p, box)
                 linked_idx[p.gid] = i
@@ -568,6 +579,19 @@ class GlobalIDManager:
                     if (ious[i, j] < self.a.apart_iou
                             and np.linalg.norm(foot(boxes[i]) - foot(boxes[j])) / self.diag > self.a.apart_dist):
                         pend.apart[gid] = pend.apart.get(gid, 0) + 1
+
+        if self.a.encl_frames > 0 and self.pending and linked_idx:
+            for i, lid in enumerate(local_ids):
+                pend = self.pending.get(lid)
+                if pend is None or lid in self.local2gid:
+                    continue
+                for gid, j in linked_idx.items():
+                    ix = max(0.0, min(boxes[i][2], boxes[j][2]) - max(boxes[i][0], boxes[j][0]))
+                    iy = max(0.0, min(boxes[i][3], boxes[j][3]) - max(boxes[i][1], boxes[j][1]))
+                    small = min((boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1]),
+                                (boxes[j][2] - boxes[j][0]) * (boxes[j][3] - boxes[j][1]))
+                    if small > 0 and ix * iy / small >= self.a.encl_cont:
+                        pend.encl[gid] = pend.encl.get(gid, 0) + 1
 
         self._update_contacts(frame_idx, linked_idx, boxes)
         if verify_tick:
@@ -649,18 +673,45 @@ class GlobalIDManager:
                             self.log(frame_idx, f"HOLD track {local_ids[i]}: the averaged match to {self.name(p.gid)} is {app:.2f} but "
                                                 f"the single views read {ind:.2f} (limit {self.a.assign_app_max + self.a.view_slack:.2f}) - not given")
                         continue
-                # Implausible jump: somebody who was hidden only a moment ago is still near where they were last
-                # seen. A NEW track that appears far away cannot be them on a borderline match: it needs a strong
-                # match (or it waits until the gap is long enough for the person to really have walked there).
-                if self.a.jump_dist > 0 and not p.exited and p.gid != pend.was_gid:
+                # Sitting on top of somebody else: this track's box has been (nearly) inside / over the box of a
+                # DIFFERENT, identified person for many frames - the same person (a second box on them) or somebody
+                # standing right in front of them. Either way it must not take another free ID on its own.
+                if self.a.encl_frames > 0:
+                    over = [(g_, c_) for g_, c_ in pend.encl.items() if c_ >= self.a.encl_frames and g_ != p.gid]
+                    if over:
+                        g_, c_ = max(over, key=lambda x: x[1])
+                        if ("c", p.gid) not in pend.held:
+                            pend.held.add(("c", p.gid))
+                            self.log(frame_idx, f"HOLD track {local_ids[i]}: its box has sat on top of {self.name(g_)}'s box for {c_} frames "
+                                                f"(the same person or somebody right in front of them) - not given {self.name(p.gid)}")
+                        continue
+                # Re-entry: somebody who left through a screen edge comes back through an edge. A track that first
+                # appeared far from every edge must match very strongly to be them.
+                if self.a.entry_edge < 1 and p.exited and p.gid != pend.was_gid and app > self.a.entry_strong:
+                    fb = pend.first_box
+                    ed = max(0.0, min(fb[0] / self.W, fb[1] / self.H, (self.W - fb[2]) / self.W, (self.H - fb[3]) / self.H))
+                    if ed > self.a.entry_edge:
+                        if ("e", p.gid) not in pend.held:
+                            pend.held.add(("e", p.gid))
+                            self.log(frame_idx, f"HOLD track {local_ids[i]}: {self.name(p.gid)} left through the screen edge but this track first "
+                                                f"appeared {ed:.0%} of the frame away from every edge and the match {app:.2f} is not very strong "
+                                                f"(needs <= {self.a.entry_strong:.2f}) - not given")
+                        continue
+                # Implausible jump: somebody who was hidden only a moment ago is still near where they were. A NEW track
+                # that appeared farther away than a person can walk in that time cannot be them on a borderline match.
+                # Distance is measured from their usual recent position (median of full-size boxes), the allowed
+                # distance grows with the time hidden.
+                if self.a.jump_base > 0 and not p.exited and p.gid != pend.was_gid:
                     gap_j = (frame_idx - p.last_frame) / self.fps
                     if gap_j <= self.a.jump_gap_s and app > self.a.jump_strong:
-                        jd = float(np.linalg.norm(foot(pend.first_box) - foot(p.last_box)) / self.diag)
-                        if jd > self.a.jump_dist:
+                        jd = float(np.linalg.norm(foot(pend.first_box) - self.recent_pos(p)) / self.diag)
+                        allowed = self.a.jump_base + self.a.jump_speed * gap_j
+                        if jd > allowed:
                             if ("j", p.gid) not in pend.held:
                                 pend.held.add(("j", p.gid))
                                 self.log(frame_idx, f"HOLD track {local_ids[i]}: {self.name(p.gid)} was seen {gap_j:.1f}s ago {jd:.2f} of the "
-                                                    f"screen away and the match {app:.2f} is not strong (needs <= {self.a.jump_strong:.2f}) - not given")
+                                                    f"screen away (a person can cover {allowed:.2f}) and the match {app:.2f} is not strong "
+                                                    f"(needs <= {self.a.jump_strong:.2f}) - not given")
                             continue
                 # Class flicker: a track whose class group changed a moment ago was JUST decided to be the other
                 # kind of person (e.g. labelled I4 at 0.11, then the detector said "Person"). A borderline match
@@ -924,8 +975,12 @@ class GlobalIDManager:
                       and float(np.median(p.bind_hist)) <= self.a.proven_fit)
             stable = stable or calm or proven
             margin = self.a.stable_margin if stable else self.a.verify_margin
+            # A calm label (long held, nobody overlapped it) sits on a continuous track: a reading that drifts
+            # up slowly is far more likely the person's look changing (pose, light, clothing) than a new
+            # identity, so only a really poor match (> calm_move_dist) may move it.
+            need = self.a.calm_move_dist if (calm and self.a.calm_move_dist > self.a.keep_dist) else self.a.keep_dist
             if (alt_g is not None and alt_d <= self.a.assign_app_max and alt_d < own - margin
-                    and (not stable or own > self.a.keep_dist)):
+                    and (not stable or own > need)):
                 v = f"move:{alt_g}"
             elif own > self.a.unlabel_dist:
                 v = "bad"
@@ -1234,12 +1289,23 @@ def parse_args():
                          "+ this (99 = off)")
     ap.add_argument("--view-min-embs", type=int, default=8, help="... needs at least this many single views")
     ap.add_argument("--view-memory", type=int, default=150, help="... single views remembered per person (about 11 s)")
-    ap.add_argument("--jump-dist", type=float, default=0.25,
-                    help="a person hidden at most --jump-gap-s ago is not given to a NEW track that appeared farther "
-                         "than this (fraction of the screen diagonal) from where they were last seen, unless the match "
-                         "is strong (0 = off)")
+    ap.add_argument("--jump-base", type=float, default=0.15,
+                    help="a person hidden at most --jump-gap-s ago is not given to a NEW track that appeared farther than "
+                         "this + --jump-speed x seconds (fractions of the screen diagonal) from where they usually were, "
+                         "unless the match is strong (0 = off)")
+    ap.add_argument("--jump-speed", type=float, default=0.10, help="... how far a person walks per second (fraction of the diagonal)")
     ap.add_argument("--jump-gap-s", type=float, default=3.0, help="... 'hidden a moment ago' = at most this many seconds")
     ap.add_argument("--jump-strong", type=float, default=0.16, help="... a match at or below this distance is always accepted")
+    ap.add_argument("--encl-frames", type=int, default=10,
+                    help="a track whose box sat inside / over another ID's box for this many frames cannot take a DIFFERENT ID (0 = off)")
+    ap.add_argument("--encl-cont", type=float, default=0.85, help="... 'inside / over' = this share of the smaller box covered")
+    ap.add_argument("--entry-edge", type=float, default=0.10,
+                    help="somebody who left through a screen edge: a new track must first appear within this fraction of the frame "
+                         "from an edge, else it needs --entry-strong (9 = off)")
+    ap.add_argument("--entry-strong", type=float, default=0.12, help="... the match needed when it did not start at an edge")
+    ap.add_argument("--calm-move-dist", type=float, default=0.40,
+                    help="a calm label (long held, no overlap) is only moved to another ID if its own distance exceeds this "
+                         "(0.30 = the old limit)")
     ap.add_argument("--flip-hold-s", type=float, default=5,
                     help="for this long after a track changes class group (Person <-> inspection) it may only take an "
                          "ID of its new pool on a strong match (0 = off)")
