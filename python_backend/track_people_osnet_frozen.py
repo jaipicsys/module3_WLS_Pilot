@@ -328,6 +328,7 @@ class Pending:
     apart: dict = field(default_factory=dict)  # gid -> frames this track was on screen far from that person
     group: int = 0  # class group of this track (0 = Person, 1 = inspection)
     held: set = field(default_factory=set)  # IDs already reported as "held back" for this track
+    views: dict = field(default_factory=dict)  # gid -> recent SINGLE-view distances of this track to that person (long memory)
 
 
 class GlobalIDManager:
@@ -356,6 +357,7 @@ class GlobalIDManager:
         self.contacts: dict[frozenset, int] = {}  # {gidA,gidB} -> last frame they overlapped
         self.next_gid = 1
         self.next_insp = INSP_BASE + 1
+        self.flip_frame: dict[int, int] = {}  # tracker id -> frame its class group last changed
 
     # -- helpers ----------------------------------------------------------- #
     def name(self, gid: int) -> str:
@@ -472,6 +474,7 @@ class GlobalIDManager:
                     p.local_id = None
                 p.history.clear()
                 p.reassigns += 1
+                self.flip_frame[lid] = frame_idx
                 self.log(frame_idx, f"UNLABEL track {lid}: was {self.name(gid)} - the track is now "
                                     f"{'an inspection person' if grp[i] else 'a Person'}")
 
@@ -493,6 +496,9 @@ class GlobalIDManager:
             for i, e in zip(need, embed_fn(boxes[need])):
                 embs[i] = e
 
+        if frame_idx % 500 == 0 and self.flip_frame:
+            for k in [k for k, f in self.flip_frame.items() if frame_idx - f > 2000]:
+                del self.flip_frame[k]
         seen_lids = set(local_ids)
         ready = []  # pending tracks that are confirmed this frame
         linked_idx = {}  # gid -> row index this frame
@@ -522,6 +528,8 @@ class GlobalIDManager:
                 pend = self.pending.get(lid)
                 if pend is None:
                     pend = self.pending[lid] = Pending(lid, frame_idx, box.copy())
+                elif pend.group != grp[i]:
+                    self.flip_frame[lid] = frame_idx
                 pend.group = grp[i]
                 pend.frames += 1
                 pend.last_seen = frame_idx
@@ -530,6 +538,10 @@ class GlobalIDManager:
                     pend.embs.append(embs[i])
                     if len(pend.embs) > 30:
                         pend.embs.pop(0)
+                    if self.a.view_slack < 90:   # remember how every single view fits every person of this pool
+                        for g_, pp in self.people.items():
+                            if pp.group == grp[i] and pp.gallery:
+                                pend.views.setdefault(g_, deque(maxlen=self.a.view_memory)).append(pp.appearance_dist(embs[i]))
                 if (pend.frames >= self.a.confirm_frames and pend.embs
                         and np.median(pend.confs[-self.a.confirm_frames:]) >= self.a.confirm_min_conf):
                     ready.append(i)
@@ -619,6 +631,47 @@ class GlobalIDManager:
                 if (self.a.apart_frames > 0 and p.gid != pend.was_gid
                         and pend.apart.get(p.gid, 0) >= self.a.apart_frames
                         and (hf is None or hf <= app + self.a.apart_fit_margin)):
+                    continue
+                # Single views: the average of many views can look close to a stored ID although NO single view
+                # does (this is how somebody who is not in the set passes the threshold). A borderline match must
+                # therefore also hold for the views we actually saw: their median distance (over ALL the views seen
+                # so far, also while the ID was still held by somebody else) may not be clearly worse than the
+                # threshold. Applies to EVERY match: the average is re-evaluated every frame, so a person who
+                # matches nobody gets many chances to dip under any line by chance - the long record of single
+                # views does not dip with it.
+                vd = pend.views.get(p.gid)
+                if (self.a.view_slack < 90 and vd is not None and len(vd) >= self.a.view_min_embs
+                        and p.gid != pend.was_gid):
+                    ind = float(np.median(vd))
+                    if ind > self.a.assign_app_max + self.a.view_slack:
+                        if ("v", p.gid) not in pend.held:
+                            pend.held.add(("v", p.gid))
+                            self.log(frame_idx, f"HOLD track {local_ids[i]}: the averaged match to {self.name(p.gid)} is {app:.2f} but "
+                                                f"the single views read {ind:.2f} (limit {self.a.assign_app_max + self.a.view_slack:.2f}) - not given")
+                        continue
+                # Implausible jump: somebody who was hidden only a moment ago is still near where they were last
+                # seen. A NEW track that appears far away cannot be them on a borderline match: it needs a strong
+                # match (or it waits until the gap is long enough for the person to really have walked there).
+                if self.a.jump_dist > 0 and not p.exited and p.gid != pend.was_gid:
+                    gap_j = (frame_idx - p.last_frame) / self.fps
+                    if gap_j <= self.a.jump_gap_s and app > self.a.jump_strong:
+                        jd = float(np.linalg.norm(foot(pend.first_box) - foot(p.last_box)) / self.diag)
+                        if jd > self.a.jump_dist:
+                            if ("j", p.gid) not in pend.held:
+                                pend.held.add(("j", p.gid))
+                                self.log(frame_idx, f"HOLD track {local_ids[i]}: {self.name(p.gid)} was seen {gap_j:.1f}s ago {jd:.2f} of the "
+                                                    f"screen away and the match {app:.2f} is not strong (needs <= {self.a.jump_strong:.2f}) - not given")
+                            continue
+                # Class flicker: a track whose class group changed a moment ago was JUST decided to be the other
+                # kind of person (e.g. labelled I4 at 0.11, then the detector said "Person"). A borderline match
+                # to an ID of the new pool must not overturn that: it needs a strong match (or waits flip_hold_s).
+                fl = self.flip_frame.get(local_ids[i])
+                if (self.a.flip_hold_s > 0 and fl is not None and p.gid != pend.was_gid
+                        and (frame_idx - fl) <= self.a.flip_hold_s * self.fps and app > self.a.flip_strong):
+                    if ("f", p.gid) not in pend.held:
+                        pend.held.add(("f", p.gid))
+                        self.log(frame_idx, f"HOLD track {local_ids[i]}: its class group changed {(frame_idx - fl) / self.fps:.1f}s ago; "
+                                            f"the match to {self.name(p.gid)} ({app:.2f}) is not strong enough (needs <= {self.a.flip_strong:.2f}) - not given")
                     continue
                 # Long absence: after a long time away there is no time/location evidence left, so a BORDERLINE
                 # match that is almost as close to somebody else is far more likely a look-alike than the
@@ -1176,6 +1229,22 @@ def parse_args():
     ap.add_argument("--refresh-min-conf", type=float, default=0.70, help="min detection confidence")
     ap.add_argument("--refresh-settle-s", type=float, default=30,
                     help="no refresh this long after an ID was (re)bound / swapped / moved")
+    ap.add_argument("--view-slack", type=float, default=0.03,
+                    help="a borderline match is only given if the MEDIAN of the single views is at most assign-app-max "
+                         "+ this (99 = off)")
+    ap.add_argument("--view-min-embs", type=int, default=8, help="... needs at least this many single views")
+    ap.add_argument("--view-memory", type=int, default=150, help="... single views remembered per person (about 11 s)")
+    ap.add_argument("--jump-dist", type=float, default=0.25,
+                    help="a person hidden at most --jump-gap-s ago is not given to a NEW track that appeared farther "
+                         "than this (fraction of the screen diagonal) from where they were last seen, unless the match "
+                         "is strong (0 = off)")
+    ap.add_argument("--jump-gap-s", type=float, default=3.0, help="... 'hidden a moment ago' = at most this many seconds")
+    ap.add_argument("--jump-strong", type=float, default=0.16, help="... a match at or below this distance is always accepted")
+    ap.add_argument("--flip-hold-s", type=float, default=5,
+                    help="for this long after a track changes class group (Person <-> inspection) it may only take an "
+                         "ID of its new pool on a strong match (0 = off)")
+    ap.add_argument("--flip-strong", type=float, default=0.16,
+                    help="... a match at or below this distance counts as strong")
     ap.add_argument("--proven-readings", type=int, default=30,
                     help="a label with at least this many clean readings since it was given ... (0 = off)")
     ap.add_argument("--proven-fit", type=float, default=0.18,
