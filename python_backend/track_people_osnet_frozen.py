@@ -374,6 +374,14 @@ class GlobalIDManager:
         m = self.a.edge_margin
         return box[0] < m * self.W or box[1] < m * self.H or box[2] > (1 - m) * self.W or box[3] > (1 - m) * self.H
 
+    def holder_fit(self, p: Person):
+        """How well this person's own track USUALLY matches its ID: the median of its recent clean
+        readings. One single reading is too noisy (a person who is partly hidden reads much worse for
+        a moment), so it is only used when there are too few readings."""
+        if len(p.own_hist) >= 5:
+            return float(np.median(p.own_hist))
+        return p.last_d[1] if p.last_d else None
+
     def recently_in_contact(self, gid: int, frame_idx: int) -> bool:
         horizon = self.a.contact_memory_s * self.fps
         return any(gid in pair and frame_idx - f <= horizon for pair, f in self.contacts.items())
@@ -599,11 +607,14 @@ class GlobalIDManager:
                 # Co-visibility: this track was on screen, far from and not overlapping with, this
                 # person's own track for >= apart_frames frames -> two different people. It may not
                 # take the ID when the person is hidden for a moment (occlusion), whether she is
-                # standing or walking. Not applied if the old holder fitted this ID worse than we do
-                # (then the holder was the wrong one).
+                # standing or walking. Not applied if the old holder USUALLY fitted this ID worse than
+                # we do (then the holder was the wrong one) - judged by its median fit, never by one
+                # noisy reading taken while it was being hidden.
+                # (operator pool only for now: the inspector pool keeps its previous behaviour)
+                hf = self.holder_fit(p) if p.group == 0 else (p.last_d[1] if p.last_d else None)
                 if (self.a.apart_frames > 0 and p.gid != pend.was_gid
                         and pend.apart.get(p.gid, 0) >= self.a.apart_frames
-                        and (p.last_d is None or p.last_d[1] <= app + self.a.apart_fit_margin)):
+                        and (hf is None or hf <= app + self.a.apart_fit_margin)):
                     continue
                 if p.gid != pend.was_gid and occupied_best < app - self.a.rank_margin:
                     continue  # someone already on screen looks more like this track -> ambiguous
