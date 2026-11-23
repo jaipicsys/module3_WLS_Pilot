@@ -326,6 +326,7 @@ class Pending:
     near: tuple | None = None  # (nearest gid, dist, holder track or None) for the overlay
     apart: dict = field(default_factory=dict)  # gid -> frames this track was on screen far from that person
     group: int = 0  # class group of this track (0 = Person, 1 = inspection)
+    held: set = field(default_factory=set)  # IDs already reported as "held back" for this track
 
 
 class GlobalIDManager:
@@ -616,6 +617,20 @@ class GlobalIDManager:
                         and pend.apart.get(p.gid, 0) >= self.a.apart_frames
                         and (hf is None or hf <= app + self.a.apart_fit_margin)):
                     continue
+                # Long absence: after a long time away there is no time/location evidence left, so a BORDERLINE
+                # match that is almost as close to somebody else is far more likely a look-alike than the
+                # returning person. Such a track stays unlabelled until the match is clear (strong, or clearly
+                # better than the second-best ID). Operator pool only for now.
+                gap_now = (frame_idx - p.last_frame) / self.fps
+                if (p.group == 0 and self.a.long_gap_s > 0 and p.gid != pend.was_gid
+                        and gap_now >= self.a.long_gap_s and app > self.a.long_gap_strong):
+                    second = min((d for g_, d in all_d.items() if g_ != p.gid), default=9.0)
+                    if second - app < self.a.long_gap_margin:
+                        if p.gid not in pend.held:
+                            pend.held.add(p.gid)
+                            self.log(frame_idx, f"HOLD track {local_ids[i]}: {self.name(p.gid)} was away {gap_now:.0f}s and "
+                                                f"the match {app:.2f} is ambiguous (next best {second:.2f}) - not given")
+                        continue
                 if p.gid != pend.was_gid and occupied_best < app - self.a.rank_margin:
                     continue  # someone already on screen looks more like this track -> ambiguous
                 prior, gap_s = self._prior(p, pend.first_box, frame_idx)
@@ -1147,6 +1162,13 @@ def parse_args():
     ap.add_argument("--refresh-min-conf", type=float, default=0.70, help="min detection confidence")
     ap.add_argument("--refresh-settle-s", type=float, default=30,
                     help="no refresh this long after an ID was (re)bound / swapped / moved")
+    ap.add_argument("--long-gap-s", type=float, default=60,
+                    help="an ID absent at least this long needs a CLEAR match before it is given to a new track "
+                         "(0 = off; operator pool only)")
+    ap.add_argument("--long-gap-strong", type=float, default=0.16,
+                    help="... a match at or below this distance is always clear enough")
+    ap.add_argument("--long-gap-margin", type=float, default=0.06,
+                    help="... otherwise it must beat the second-best ID by at least this much")
     ap.add_argument("--apart-frames", type=int, default=5,
                     help="a track seen this many frames on screen far from person P (not overlapping) "
                          "can never take P's ID when P is hidden briefly (0 = off)")
