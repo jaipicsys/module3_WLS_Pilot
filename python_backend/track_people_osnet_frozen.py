@@ -303,6 +303,7 @@ class Person:
     contact_frame: int = -10**9  # last frame this person overlapped another tracked person
     group: int = 0  # 0 = Person / operator IDs (P1..), 1 = inspection IDs (I1..): never shared
     own_hist: deque = field(default_factory=lambda: deque(maxlen=60))  # own-distance readings outside overlaps
+    bind_hist: deque = field(default_factory=lambda: deque(maxlen=400))  # ALL clean own-distance readings since the label was given
 
     def appearance_dist(self, q: np.ndarray, topk: int = 3) -> float:
         """1 - mean of top-k cosine similarities against the gallery (robust to pose)."""
@@ -433,6 +434,7 @@ class GlobalIDManager:
         p.exited = False
         p.history.clear()
         p.bind_frame = frame_idx
+        p.bind_hist.clear()
         p.bind_how = ""
 
     def new_person(self, pend: Pending, box, frame_idx) -> Person:
@@ -512,6 +514,7 @@ class GlobalIDManager:
                     p.last_d = (frame_idx, d)
                     if not self.recently_in_contact(p.gid, frame_idx):
                         p.own_hist.append(d)  # the person's NORMAL fit, never measured right after an overlap
+                        p.bind_hist.append(d)
                     if d < self.a.gallery_accept_dist and all(v == "ok" for v in p.history):
                         self.add_to_gallery(p, embs[i], frame_idx)  # no-op once frozen
                 out[i] = (lid, p.gid, "tracked", d)
@@ -814,6 +817,7 @@ class GlobalIDManager:
                 q.history.clear()
                 q.reassigns += 1
                 q.bind_frame = frame_idx
+                q.bind_hist.clear()
                 q.bind_how = "swap"
             self.log(frame_idx, f"SWAP {self.name(ga)}<->{self.name(gb)} (tracks {lid},{lid2}) after overlap: "
                                 f"straight={straight:.2f} crossed={crossed:.2f}")
@@ -857,7 +861,15 @@ class GlobalIDManager:
             # ID unless its own match is really poor (> keep_dist). A noisy 0.22-vs-0.13 reading must
             # not hand an absent person's ID to somebody who already has one.
             calm = frame_idx - max(p.bind_frame, p.contact_frame) >= self.a.stable_s * self.fps
-            stable = stable or calm
+            # ... and so does a label with a PROVEN record: over EVERYTHING since it was given, this track has
+            # matched it well (median own distance <= proven_fit, >= proven_readings clean readings) and
+            # nobody overlapped it recently. A dip of some seconds (turned / partly hidden) must not hand it
+            # to an absent person's ID; only a really poor own match (> keep_dist) can. A dip that lasts
+            # longer than the good record eventually outweighs it.
+            proven = (self.a.proven_readings > 0 and len(p.bind_hist) >= self.a.proven_readings
+                      and not self.recently_in_contact(gid, frame_idx)
+                      and float(np.median(p.bind_hist)) <= self.a.proven_fit)
+            stable = stable or calm or proven
             margin = self.a.stable_margin if stable else self.a.verify_margin
             if (alt_g is not None and alt_d <= self.a.assign_app_max and alt_d < own - margin
                     and (not stable or own > self.a.keep_dist)):
@@ -909,6 +921,8 @@ class GlobalIDManager:
                         p.reassigns += 1
                         q.reassigns += 1
                         p.bind_frame = q.bind_frame = frame_idx
+                        p.bind_hist.clear()
+                        q.bind_hist.clear()
                         p.bind_how = q.bind_how = "swap"
                         self.log(frame_idx, f"SWAP {self.name(gid)}<->{self.name(alt_g)} (tracks {lid},{lid2}): "
                                             f"straight={own + D2[alt_g]:.2f} crossed={alt_d + D2[gid]:.2f}")
@@ -1162,6 +1176,11 @@ def parse_args():
     ap.add_argument("--refresh-min-conf", type=float, default=0.70, help="min detection confidence")
     ap.add_argument("--refresh-settle-s", type=float, default=30,
                     help="no refresh this long after an ID was (re)bound / swapped / moved")
+    ap.add_argument("--proven-readings", type=int, default=30,
+                    help="a label with at least this many clean readings since it was given ... (0 = off)")
+    ap.add_argument("--proven-fit", type=float, default=0.18,
+                    help="... whose median own distance is at most this counts as proven: it can only be "
+                         "moved if its own distance is really poor (> keep-dist)")
     ap.add_argument("--long-gap-s", type=float, default=60,
                     help="an ID absent at least this long needs a CLEAR match before it is given to a new track "
                          "(0 = off; operator pool only)")
