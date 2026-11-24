@@ -360,6 +360,10 @@ class GlobalIDManager:
         self.next_gid = 1
         self.next_insp = INSP_BASE + 1
         self.flip_frame: dict[int, int] = {}  # tracker id -> frame its class group last changed
+        self.flip_since: dict[int, int] = {}  # tracker id -> frame a (so far ignored) class change of a long-held label began
+        self.flip_was: dict[int, tuple] = {}  # tracker id -> (old gid, frame) of a long-held label released by a class change
+        self.work_cells: dict = {}  # (cell x, cell y) -> confident operator observations there (learnt working area)
+        self.work_total = 0
 
     # -- helpers ----------------------------------------------------------- #
     def name(self, gid: int) -> str:
@@ -478,6 +482,16 @@ class GlobalIDManager:
             gid = self.local2gid.get(lid)
             if gid is not None and self.people[gid].group != grp[i]:
                 p = self.people[gid]
+                held_s = (frame_idx - p.bind_frame) / self.fps
+                if self.a.flip_persist_s > 0 and held_s >= self.a.flip_keep_s:
+                    # A label held for a long time sits on a continuous track: a class change that lasts only a
+                    # moment is the detector flickering (in your clip every such release lasted 0.8-1.8 s and the
+                    # class went back), not the person changing. Ignore it until it has lasted flip_persist_s.
+                    first = self.flip_since.setdefault(lid, frame_idx)
+                    if frame_idx - first < self.a.flip_persist_s * self.fps:
+                        grp[i] = p.group
+                        continue
+                    self.flip_was[lid] = (gid, frame_idx)
                 del self.local2gid[lid]
                 if p.local_id == lid:
                     p.local_id = None
@@ -486,6 +500,8 @@ class GlobalIDManager:
                 self.flip_frame[lid] = frame_idx
                 self.log(frame_idx, f"UNLABEL track {lid}: was {self.name(gid)} - the track is now "
                                     f"{'an inspection person' if grp[i] else 'a Person'}")
+            elif gid is not None:
+                self.flip_since.pop(lid, None)
 
         ious = iou_matrix(boxes, boxes)
         np.fill_diagonal(ious, 0)
@@ -505,9 +521,13 @@ class GlobalIDManager:
             for i, e in zip(need, embed_fn(boxes[need])):
                 embs[i] = e
 
-        if frame_idx % 500 == 0 and self.flip_frame:
+        if frame_idx % 500 == 0 and (self.flip_frame or self.flip_was or self.flip_since):
             for k in [k for k, f in self.flip_frame.items() if frame_idx - f > 2000]:
                 del self.flip_frame[k]
+            for k in [k for k, v in self.flip_was.items() if frame_idx - v[1] > 2000]:
+                del self.flip_was[k]
+            for k in [k for k, f in self.flip_since.items() if frame_idx - f > 2000]:
+                del self.flip_since[k]
         seen_lids = set(local_ids)
         ready = []  # pending tracks that are confirmed this frame
         linked_idx = {}  # gid -> row index this frame
@@ -529,6 +549,10 @@ class GlobalIDManager:
                 if embs.get(i) is not None:
                     d = p.appearance_dist(embs[i])
                     p.last_d = (frame_idx, d)
+                    if p.group == 0 and d <= self.a.area_conf and self.a.area_min_total > 0:
+                        c_ = (int(foot(box)[0] // self.a.area_cell), int(foot(box)[1] // self.a.area_cell))
+                        self.work_cells[c_] = self.work_cells.get(c_, 0) + 1
+                        self.work_total += 1
                     if not self.recently_in_contact(p.gid, frame_idx):
                         p.own_hist.append(d)  # the person's NORMAL fit, never measured right after an overlap
                         p.bind_hist.append(d)
@@ -537,10 +561,16 @@ class GlobalIDManager:
                 out[i] = (lid, p.gid, "tracked", d)
             else:  # ---- new / pending / unknown track id
                 pend = self.pending.get(lid)
-                if pend is None:
+                created = pend is None
+                if created:
                     pend = self.pending[lid] = Pending(lid, frame_idx, box.copy())
                 elif pend.group != grp[i]:
                     self.flip_frame[lid] = frame_idx
+                if created or pend.group != grp[i]:
+                    fw = self.flip_was.get(lid)
+                    if (fw is not None and pend.was_gid is None and fw[0] in self.people
+                            and self.people[fw[0]].group == grp[i] and frame_idx - fw[1] <= 60 * self.fps):
+                        pend.was_gid = fw[0]   # back in its old class group: may return to its old ID, like after any unlabel
                 pend.group = grp[i]
                 pend.frames += 1
                 pend.last_seen = frame_idx
@@ -672,6 +702,24 @@ class GlobalIDManager:
                             pend.held.add(("v", p.gid))
                             self.log(frame_idx, f"HOLD track {local_ids[i]}: the averaged match to {self.name(p.gid)} is {app:.2f} but "
                                                 f"the single views read {ind:.2f} (limit {self.a.assign_app_max + self.a.view_slack:.2f}) - not given")
+                        continue
+                # Working area: operators work in places where operators have been confidently seen working. A track
+                # that stands where NO operator was ever confidently seen (and did not just come in through a screen
+                # edge) is not an operator - somebody passing or standing far behind - and must not take an operator
+                # ID on a weak match. The area is learnt from the system's own confident labels (it needs plenty of
+                # them first), nothing is configured.
+                if (self.a.area_min_total > 0 and self.work_total >= self.a.area_min_total and pend.group == 0
+                        and p.gid != pend.was_gid and app > self.a.area_strong):
+                    bx_ = boxes[i]
+                    cx_, cy_ = int(foot(bx_)[0] // self.a.area_cell), int(foot(bx_)[1] // self.a.area_cell)
+                    seen_ = sum(self.work_cells.get((cx_ + dx, cy_ + dy), 0) for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+                    edge_ = max(0.0, min(bx_[0] / self.W, bx_[1] / self.H, (self.W - bx_[2]) / self.W, (self.H - bx_[3]) / self.H))
+                    if seen_ < self.a.area_min_visits and edge_ > self.a.area_edge:
+                        if ("a", p.gid) not in pend.held:
+                            pend.held.add(("a", p.gid))
+                            self.log(frame_idx, f"HOLD track {local_ids[i]}: standing where no operator has been confidently seen working "
+                                                f"({seen_} observations near) and the match {app:.2f} is not very strong "
+                                                f"(needs <= {self.a.area_strong:.2f}) - not given {self.name(p.gid)}")
                         continue
                 # Sitting on top of somebody else: this track's box has been (nearly) inside / over the box of a
                 # DIFFERENT, identified person for many frames - the same person (a second box on them) or somebody
@@ -1296,6 +1344,16 @@ def parse_args():
     ap.add_argument("--jump-speed", type=float, default=0.10, help="... how far a person walks per second (fraction of the diagonal)")
     ap.add_argument("--jump-gap-s", type=float, default=3.0, help="... 'hidden a moment ago' = at most this many seconds")
     ap.add_argument("--jump-strong", type=float, default=0.16, help="... a match at or below this distance is always accepted")
+    ap.add_argument("--flip-persist-s", type=float, default=5.0,
+                    help="a label held at least --flip-keep-s ignores a class-group change until it has lasted this long (0 = off)")
+    ap.add_argument("--flip-keep-s", type=float, default=60.0, help="... 'long-held' = at least this many seconds")
+    ap.add_argument("--area-min-total", type=int, default=10000,
+                    help="learn the operators' working area from this many confident observations before using it (0 = off)")
+    ap.add_argument("--area-conf", type=float, default=0.16, help="... an observation is confident if its own distance is at most this")
+    ap.add_argument("--area-cell", type=int, default=60, help="... size of a map cell in pixels")
+    ap.add_argument("--area-min-visits", type=int, default=5, help="... a place (3x3 cells) needs at least this many observations")
+    ap.add_argument("--area-edge", type=float, default=0.10, help="... tracks within this fraction of the frame from an edge are exempt")
+    ap.add_argument("--area-strong", type=float, default=0.12, help="... a match at or below this is accepted anywhere")
     ap.add_argument("--encl-frames", type=int, default=10,
                     help="a track whose box sat inside / over another ID's box for this many frames cannot take a DIFFERENT ID (0 = off)")
     ap.add_argument("--encl-cont", type=float, default=0.85, help="... 'inside / over' = this share of the smaller box covered")
