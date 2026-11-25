@@ -1,8 +1,8 @@
 """
 Person tracking for the operator logic (one instance per camera).
 
-Uses track_people_osnet_frozen.py as-is:
-  short term : YOLO person model + BoT-SORT (model.track, persist=True)
+Uses track_people_osnet_frozen.py for OSNet/global-ID logic:
+  short term : shared batched YOLO detection + one independent BoT-SORT per camera
   long term  : GlobalIDManager -> stable P-IDs (P1..Pmax_ids), OSNet appearance,
                frozen gallery learnt in each person's first learn_s seconds
 
@@ -41,10 +41,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
+from ultralytics.trackers.bot_sort import BOTSORT
+from ultralytics.utils import YAML, IterableSimpleNamespace
 
 import track_people_osnet_frozen as tp
 from config_utils import BASE_DIR, CONFIG, resolve_model_path
+from batch_inference import get_shared_detector
 
 _ARGS_LOCK = threading.Lock()
 
@@ -105,7 +107,7 @@ class PersonTracker:
                 raise ValueError(f"tracking.overrides: unknown option '{key}'")
             setattr(self.args, key, value)
 
-        # ---- person model (separate YOLO instance: track() keeps its own state) ----
+        # ---- person model (one shared YOLO detector; camera-local trackers below) ----
         if cfg.get("person_model"):
             weights = resolve_model_path(cfg["person_model"])
             self.person_class = cfg.get("person_class", 0)
@@ -114,14 +116,20 @@ class PersonTracker:
             self.person_class = fallback_class
         else:
             raise ValueError("tracking.person_model is not set in config.json")
-        self.model = YOLO(weights)
+        # ---- shared YOLO detector; BoT-SORT remains one instance per camera ----
+        self._detector = get_shared_detector(
+            weights=weights, device=device, classes=None, conf=self.args.conf,
+            imgsz=self.args.imgsz, batch_size=cfg.get("batch_size", 2),
+            batch_wait_ms=cfg.get("batch_wait_ms", 30),
+        )
 
         # ---- which classes are tracked as people (default: only person_class, as before) ----
         # tracking.person_classes      e.g. ["Person", "Inspection_Person"] (names or ids)
         # tracking.non_operator_classes e.g. ["Inspection_Person"]: tracked and shown with a
         #     P-ID, but never bound to an operator seat by the station logic.
-        _names = {int(k): str(v) for k, v in self.model.names.items()}
+        _names = {int(k): str(v) for k, v in self._detector.model.names.items()}
         self.person_classes = _resolve_classes(cfg.get("person_classes"), [self.person_class], _names)
+        self._detector.set_classes(self.person_classes)
         self.non_operator_classes = set(_resolve_classes(cfg.get("non_operator_classes"), [], _names))
         self._cls_votes = {}   # tracker id -> (recent class ids, last frame seen)
         # Debug: also show people OUTSIDE the station ROI in the video (thin box + "(out)").
@@ -183,23 +191,28 @@ class PersonTracker:
         self.mgr = None
         self.frame_idx = 0
 
-        # Warm-up: first calls are slow (CUDA init); do them before the stream starts.
+        # Independent BoT-SORT state for this camera. OSNet remains the project's
+        # separate appearance-ReID layer in GlobalIDManager.
+        self._create_botsort()
         _dummy = np.zeros((1080, 1920, 3), np.uint8)
-        self.model.track(_dummy, persist=True, tracker=str(self.yaml_path),
-                         classes=self.person_classes, conf=self.args.conf,
-                         imgsz=self.args.imgsz, device=self.device,
-                         half=self.half, verbose=False,
-                         agnostic_nms=len(self.person_classes) > 1)
         self.encoder(_dummy, np.array([[100, 100, 200, 400]], np.float32))
-        _pred = getattr(self.model, "predictor", None)
-        for _t in (getattr(_pred, "trackers", None) or []):
-            _t.reset()
 
         print(f"[INFO] {camera_id}: person tracking on, max_ids={self.args.max_ids}, "
               f"gallery={self.args.gallery_mode}, learn_s={self.args.learn_s}, "
               f"area={'station ROI' if self.roi is not None else 'full frame'}, "
               f"crops={'every %d frames' % self.crop_every if self.crop_every else 'off'}")
         print(f"[INFO] {camera_id}: tracking logs -> {self.run_dir}")
+
+    def _create_botsort(self):
+        """Create a camera-local BoT-SORT tracker from the existing YAML settings."""
+        tracker_cfg = YAML.load(str(self.yaml_path))
+        # Native detector-feature ReID needs Ultralytics track-mode hooks. The
+        # project's separate OSNet encoder/GlobalIDManager still performs Re-ID.
+        tracker_cfg["with_reid"] = False
+        tracker_args = IterableSimpleNamespace(**tracker_cfg)
+        # Match Ultralytics 8.3.234 track callback's default frame_rate=30.
+        self.botsort = BOTSORT(tracker_args, frame_rate=30)
+        print(f"[BATCH] {self.camera_id}: independent BoT-SORT ready; OSNet Re-ID remains camera-local")
 
     # ------------------------------------------------------------------ #
     # log files
@@ -387,12 +400,10 @@ class PersonTracker:
         """Forget every P-ID (e.g. at a shift change: new people, closed set starts again)."""
         self.write_summary()                 # close the old ID set in the events file
         self.mgr = None
-        predictor = getattr(self.model, "predictor", None)
-        for t in (getattr(predictor, "trackers", None) or []):
-            try:
-                t.reset()
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            self.botsort.reset()
+        except Exception:  # noqa: BLE001
+            pass
         self._log(self.frame_idx, "=== RESET: all P-IDs forgotten ===")
 
     # ------------------------------------------------------------------ #
@@ -417,20 +428,28 @@ class PersonTracker:
             # Time-based settings (learn_s, verify_after_s, ...) follow the real rate.
             self.mgr.fps = float(np.clip(1.0 / self._dt, 1, 60))
 
-        res = self.model.track(
-            frame, persist=True, tracker=str(self.yaml_path),
-            classes=self.person_classes, conf=self.args.conf, imgsz=self.args.imgsz,
-            device=self.device, half=self.half, verbose=False,
-            # one human can be detected as two classes: keep only the stronger box
-            agnostic_nms=len(self.person_classes) > 1,
-        )[0]
-
+        # Shared YOLO inference batches frames submitted by camera workers. Each
+        # camera then updates only its own BoT-SORT instance.
+        res = self._detector.infer(self.camera_id, frame)
         b = res.boxes
-        if b is not None and b.id is not None and len(b):
-            boxes = b.xyxy.cpu().numpy().astype(np.float32)
-            lids = b.id.cpu().numpy().astype(int).tolist()
-            confs = b.conf.cpu().numpy()
-            clss = b.cls.cpu().numpy().astype(int).tolist()
+        if b is not None and len(b):
+            det_boxes = b.xyxy.cpu().numpy().astype(np.float32)
+            det_confs = b.conf.cpu().numpy().astype(np.float32)
+            det_clss = b.cls.cpu().numpy().astype(int)
+            tracked = self.botsort.update(b.cpu().numpy(), frame)
+        else:
+            det_boxes = np.zeros((0, 4), np.float32)
+            det_confs = np.zeros((0,), np.float32)
+            det_clss = np.zeros((0,), dtype=int)
+            tracked = self.botsort.update(b.cpu().numpy(), frame)
+
+        if tracked is not None and len(tracked):
+            tracked = np.asarray(tracked, dtype=np.float32)
+            lids = tracked[:, 4].astype(int).tolist()
+            det_indices = tracked[:, 7].astype(int)
+            boxes = det_boxes[det_indices]
+            confs = det_confs[det_indices]
+            clss = det_clss[det_indices].astype(int).tolist()
         else:
             boxes, lids, confs, clss = np.zeros((0, 4), np.float32), [], np.zeros(0), []
 
@@ -491,5 +510,7 @@ class PersonTracker:
         self.fps = fps
         self.auto_fps = False
         tp.write_tracker_yaml(self.yaml_path, self.args, self.fps)
+        if hasattr(self, "botsort"):
+            self._create_botsort()
         if self.mgr is not None:
             self.mgr.fps = self.fps
