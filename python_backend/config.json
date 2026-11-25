@@ -15,8 +15,7 @@
   "record_retention_days": 7,
   "plant": "Unit 1 Textile",
   "rtsp_urls": {
-    "cam1": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/packing_13fps.mp4",
-    "cam2": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/packing_13fps.mp4"
+    "cam1": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/packing_13fps.mp4"
   },
   "file_playback": "every_frame",
   "models_dir": "models",
@@ -30,8 +29,8 @@
   "tracking": {
     "person_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/welspun_imvd_prsn_171126.pt",
     "reid_model": "/home/pranav/pranav_mishra/module3_WLS_Pilot/python_backend/models/osnet_x1_0_msmt17.pt",
-    "max_ids": 24,
-    "max_insp_ids": 12,
+    "max_ids": 12,
+    "max_insp_ids": 6,
     "person_classes": ["Person", "Inspection_Person"],
     "non_operator_classes": ["Inspection_Person"],
     "show_outside_roi": false,
@@ -55,9 +54,7 @@
       "refresh_every_s": 0
     },
     "roi_margin_px": 150,
-    "auto_fps": false,
-    "batch_size": 2,
-    "batch_wait_ms": 40
+    "auto_fps": false
   },
   "operator_status": {
     "person_conf": 0.3,
@@ -219,102 +216,6 @@
               ]
             },
             "OP7": {
-              "enabled": true,
-              "logic": "always_active",
-              "roi": [
-                [1033, 379],
-                [1297, 306],
-                [1493, 656],
-                [1134, 779]
-              ]
-            }
-          }
-        },
-        "ST02": {
-          "station_name": "Station 1",
-          "camera": "cam2",
-          "operation": "Packing",
-          "roi": [
-            [211, 524],
-            [1360, 294],
-            [1709, 429],
-            [1784, 689],
-            [1735, 872],
-            [1411, 758],
-            [622, 1073],
-            [297, 1069]
-          ],
-          "box_count": {
-            "person_class": "Yellow_Person",
-            "person_conf": 0.4,
-            "box_classes": ["Closed_Box"],
-            "box_conf": 0.4,
-            "overlap_min": 0.1,
-            "overlap_frames": 5,
-            "release_s": 2
-          },
-          "operators": {
-            "OP11": {
-              "enabled": true,
-              "logic": "wrist_on_towel",
-              "roi": [
-                [444, 484],
-                [470, 746],
-                [664, 682],
-                [586, 453]
-              ]
-            },
-            "OP12": {
-              "enabled": true,
-              "logic": "wrist_on_towel",
-              "roi": [
-                [476, 716],
-                [540, 1059],
-                [775, 1004],
-                [661, 623]
-              ]
-            },
-            "OP13": {
-              "enabled": true,
-              "logic": "wrist_on_towel_or_box",
-              "roi": [
-                [745, 645],
-                [819, 979],
-                [1168, 885],
-                [1041, 557]
-              ]
-            },
-            "OP14": {
-              "enabled": true,
-              "logic": "wrist_on_towel_or_box",
-              "roi": [
-                [608, 429],
-                [687, 664],
-                [917, 576],
-                [753, 354]
-              ]
-            },
-            "OP15": {
-              "enabled": true,
-              "logic": "box_with_towel_overlap",
-              "roi": [
-                [861, 428],
-                [1167, 354],
-                [1166, 562],
-                [904, 620]
-              ]
-            },
-            "OP16": {
-              "enabled": true,
-              "logic": "always_active",
-              "roi": [
-                [1504, 623],
-                [1576, 896],
-                [1860, 800],
-                [1705, 535]
-              ]
-            },
-            "OP17": {
               "enabled": true,
               "logic": "always_active",
               "roi": [
